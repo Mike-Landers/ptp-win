@@ -23,6 +23,40 @@ TEXT_EXTENSIONS = {
     ".toml", ".ts", ".tsx", ".txt", ".xml", ".yaml", ".yml",
 }
 
+THEMES = {
+    "standard_light": {
+        "app": "#f5f7fb", "card": "#ffffff", "title": "#172033", "body": "#526078",
+        "meta": "#8490a5", "group": "#344057", "status": "#eef2f8", "button": "#eef2f8",
+        "button_active": "#dfe7f3", "primary": "#1d6fe8", "primary_active": "#155bc2",
+        "disabled": "#b8c7dc", "entry": "#ffffff", "trough": "#e7edf5", "progress": "#1d6fe8",
+    },
+    "high_contrast_light": {
+        "app": "#ffffff", "card": "#ffffff", "title": "#000000", "body": "#111111",
+        "meta": "#333333", "group": "#000000", "status": "#fff3cd", "button": "#eeeeee",
+        "button_active": "#cccccc", "primary": "#005fcc", "primary_active": "#003f8f",
+        "disabled": "#999999", "entry": "#ffffff", "trough": "#cccccc", "progress": "#005fcc",
+    },
+    "standard_dark": {
+        "app": "#1e232b", "card": "#28303b", "title": "#f5f7fb", "body": "#c5ceda",
+        "meta": "#a8b3c2", "group": "#e3e9f2", "status": "#303946", "button": "#394451",
+        "button_active": "#4a5868", "primary": "#2f80ed", "primary_active": "#5a9cf2",
+        "disabled": "#66717f", "entry": "#202631", "trough": "#414b59", "progress": "#4da3ff",
+    },
+    "high_contrast_dark": {
+        "app": "#000000", "card": "#0b0b0b", "title": "#ffffff", "body": "#ffffff",
+        "meta": "#ffffff", "group": "#ffffff", "status": "#1a1a1a", "button": "#222222",
+        "button_active": "#444444", "primary": "#ffde00", "primary_active": "#ffffff",
+        "disabled": "#777777", "entry": "#000000", "trough": "#555555", "progress": "#00e5ff",
+    },
+}
+
+THEME_LABELS = {
+    "standard_light": "Standard light",
+    "high_contrast_light": "High-contrast light",
+    "standard_dark": "Standard dark",
+    "high_contrast_dark": "High-contrast dark",
+}
+
 
 @dataclass
 class FileEntry:
@@ -294,7 +328,7 @@ class LinkClient:
             time.sleep(0.5)
 
 
-from .models import FileEntry, TorrentShare, group_share_files, sort_share_files
+from .models import FileEntry, TorrentShare, group_share_files, is_magnet_link, sort_share_files
 from .storage import DownloadStore
 from .transfer import LinkClient
 
@@ -325,6 +359,10 @@ class DropLinkApp(tk.Tk):
         self.busy = False
         self.link_var = tk.StringVar()
         self.destination_var = tk.StringVar(value=str(DEFAULT_DOWNLOAD_DIR))
+        self.theme_var = tk.StringVar(value="standard_light")
+        self.auto_detect_magnets_var = tk.BooleanVar(value=False)
+        self.last_clipboard_text = ""
+        self.clipboard_prompt_active = False
         self.status_var = tk.StringVar(value="Use Load files to choose a peer link")
         self.share_title_var = tk.StringVar(value="No share loaded")
         self.selection_var = tk.StringVar(value="0 files selected")
@@ -335,45 +373,60 @@ class DropLinkApp(tk.Tk):
         self._configure_style()
         self._build_ui()
         self.after(100, self._process_events)
+        self.after(500, self._poll_clipboard)
 
     def _configure_style(self) -> None:
         style = ttk.Style(self)
         style.theme_use("clam")
-        style.configure("App.TFrame", background="#f5f7fb")
-        style.configure("Card.TFrame", background="#ffffff")
-        style.configure("Title.TLabel", background="#f5f7fb", foreground="#172033", font=("Segoe UI Semibold", 25))
-        style.configure("Subtitle.TLabel", background="#f5f7fb", foreground="#657086", font=("Segoe UI", 10))
-        style.configure("CardTitle.TLabel", background="#ffffff", foreground="#172033", font=("Segoe UI Semibold", 13))
-        style.configure("Body.TLabel", background="#ffffff", foreground="#526078", font=("Segoe UI", 9))
-        style.configure("File.TLabel", background="#ffffff", foreground="#172033", font=("Segoe UI Semibold", 10))
-        style.configure("Meta.TLabel", background="#ffffff", foreground="#8490a5", font=("Segoe UI", 9))
-        style.configure("Group.TLabel", background="#ffffff", foreground="#344057", font=("Segoe UI Semibold", 9))
-        style.configure("Status.TLabel", background="#eef2f8", foreground="#526078", font=("Segoe UI", 9))
-        style.configure("Primary.TButton", background="#1d6fe8", foreground="#ffffff", borderwidth=0, padding=(18, 10), font=("Segoe UI Semibold", 10))
-        style.map("Primary.TButton", background=[("active", "#155bc2"), ("disabled", "#b8c7dc")])
-        style.configure("Secondary.TButton", background="#eef2f8", foreground="#344057", borderwidth=0, padding=(12, 9), font=("Segoe UI Semibold", 9))
-        style.map("Secondary.TButton", background=[("active", "#dfe7f3")])
-        style.configure("Link.TEntry", fieldbackground="#ffffff", foreground="#172033", padding=10, borderwidth=1)
-        style.configure("Folder.TEntry", fieldbackground="#ffffff", foreground="#172033", padding=8, borderwidth=1)
-        style.configure("Download.Horizontal.TProgressbar", troughcolor="#e7edf5", background="#1d6fe8", borderwidth=0, thickness=8)
+        colors = THEMES[self.theme_var.get()]
+        style.configure("App.TFrame", background=colors["app"])
+        style.configure("Card.TFrame", background=colors["card"])
+        style.configure("Title.TLabel", background=colors["app"], foreground=colors["title"], font=("Segoe UI Semibold", 25))
+        style.configure("Subtitle.TLabel", background=colors["app"], foreground=colors["body"], font=("Segoe UI", 10))
+        style.configure("CardTitle.TLabel", background=colors["card"], foreground=colors["title"], font=("Segoe UI Semibold", 13))
+        style.configure("Body.TLabel", background=colors["card"], foreground=colors["body"], font=("Segoe UI", 9))
+        style.configure("File.TLabel", background=colors["card"], foreground=colors["title"], font=("Segoe UI Semibold", 10))
+        style.configure("Meta.TLabel", background=colors["card"], foreground=colors["meta"], font=("Segoe UI", 9))
+        style.configure("Group.TLabel", background=colors["card"], foreground=colors["group"], font=("Segoe UI Semibold", 9))
+        style.configure("Status.TLabel", background=colors["status"], foreground=colors["body"], font=("Segoe UI", 9))
+        style.configure("Primary.TButton", background=colors["primary"], foreground="#000000" if self.theme_var.get() == "high_contrast_dark" else "#ffffff", borderwidth=0, padding=(18, 10), font=("Segoe UI Semibold", 10))
+        style.map("Primary.TButton", background=[("active", colors["primary_active"]), ("disabled", colors["disabled"])])
+        style.configure("Secondary.TButton", background=colors["button"], foreground=colors["title"], borderwidth=0, padding=(12, 9), font=("Segoe UI Semibold", 9))
+        style.map("Secondary.TButton", background=[("active", colors["button_active"])])
+        style.configure("Theme.TRadiobutton", background=colors["app"], foreground=colors["title"], font=("Segoe UI", 10))
+        style.configure("Theme.TCheckbutton", background=colors["app"], foreground=colors["title"], font=("Segoe UI", 10))
+        style.configure("Link.TEntry", fieldbackground=colors["entry"], foreground=colors["title"], padding=10, borderwidth=1)
+        style.configure("Folder.TEntry", fieldbackground=colors["entry"], foreground=colors["title"], padding=8, borderwidth=1)
+        style.configure("Download.Horizontal.TProgressbar", troughcolor=colors["trough"], background=colors["progress"], borderwidth=0, thickness=8)
+        self.configure(bg=colors["app"])
+        if hasattr(self, "files_canvas"):
+            self.files_canvas.configure(background=colors["card"])
+
+    def _apply_theme(self, theme: str) -> None:
+        if theme not in THEMES:
+            return
+        self.theme_var.set(theme)
+        self._configure_style()
 
     def _build_ui(self) -> None:
         root = ttk.Frame(self, style="App.TFrame", padding=(34, 28, 34, 24))
         root.pack(fill="both", expand=True)
-        header = ttk.Frame(root, style="App.TFrame")
-        header.pack(fill="x", pady=(0, 22))
-        title_block = ttk.Frame(header, style="App.TFrame")
-        title_block.pack(side="left")
-        ttk.Label(title_block, text="DropLink", style="Title.TLabel").pack(anchor="w")
-        ttk.Label(title_block, text="Choose what to bring down from a peer share.", style="Subtitle.TLabel").pack(anchor="w", pady=(3, 0))
-        self.load_menu = tk.Menu(self, tearoff=False)
-        self.load_menu.add_command(label="Load link...", command=self.show_load_dialog)
-        self.load_menu.add_command(label="Try demo share", command=self.load_demo)
-        self.load_menu.add_separator()
-        self.resume_menu_index = self.load_menu.index("end") + 1
-        self.load_menu.add_command(label="Resume saved (0)", command=self.show_saved_shares, state="disabled")
-        self.load_button = ttk.Menubutton(header, text="Load files  v", menu=self.load_menu, style="Primary.TButton")
-        self.load_button.pack(side="right")
+        self.menu_bar = tk.Menu(self)
+        self.file_menu = tk.Menu(self.menu_bar, tearoff=False)
+        self.file_menu.add_command(label="Download New Link...", command=self.show_load_dialog)
+        self.file_menu.add_separator()
+        self.resume_menu_index = self.file_menu.index("end") + 1
+        self.file_menu.add_command(label="Resume saved (0)", command=self.show_saved_shares, state="disabled")
+        self.file_menu.add_separator()
+        self.stop_all_menu_index = self.file_menu.index("end") + 1
+        self.file_menu.add_command(label="Stop all Downloads", command=self.stop_all_downloads, state="disabled")
+        self.resume_all_menu_index = self.file_menu.index("end") + 1
+        self.file_menu.add_command(label="Resume all Downloads", command=self.resume_all_downloads, state="disabled")
+        self.menu_bar.add_cascade(label="File", menu=self.file_menu)
+        edit_menu = tk.Menu(self.menu_bar, tearoff=False)
+        edit_menu.add_command(label="Settings...", command=self.show_settings_dialog)
+        self.menu_bar.add_cascade(label="Edit", menu=edit_menu)
+        self.configure(menu=self.menu_bar)
         self._refresh_resume_button()
 
         content_pane = ttk.PanedWindow(root, orient="vertical")
@@ -399,14 +452,6 @@ class DropLinkApp(tk.Tk):
         self._show_empty_state()
         content_pane.add(list_card, weight=4)
 
-        settings = ttk.Frame(root, style="Card.TFrame", padding=20)
-        ttk.Label(settings, text="Download location", style="CardTitle.TLabel").pack(anchor="w")
-        folder_row = ttk.Frame(settings, style="Card.TFrame")
-        folder_row.pack(fill="x", pady=(10, 0))
-        ttk.Entry(folder_row, textvariable=self.destination_var, style="Folder.TEntry").pack(side="left", fill="x", expand=True)
-        ttk.Button(folder_row, text="Browse", command=self.choose_folder, style="Secondary.TButton").pack(side="left", padx=(10, 0))
-        content_pane.add(settings, weight=1)
-
         footer = ttk.Frame(root, style="App.TFrame")
         footer.pack(fill="x")
         ttk.Label(footer, textvariable=self.status_var, style="Status.TLabel", padding=(10, 8)).pack(side="left", fill="x", expand=True)
@@ -428,9 +473,93 @@ class DropLinkApp(tk.Tk):
         ttk.Label(self.files_frame, text="Use Load files above to inspect a peer share.", style="Body.TLabel").pack(pady=(0, 70))
 
     def _refresh_resume_button(self) -> None:
-        if hasattr(self, "load_menu"):
+        if hasattr(self, "file_menu"):
             count = len(self.store.records())
-            self.load_menu.entryconfigure(self.resume_menu_index, label=f"Resume saved ({count})", state="normal" if count else "disabled")
+            self.file_menu.entryconfigure(self.resume_menu_index, label=f"Resume saved ({count})", state="normal" if count else "disabled")
+
+    def _on_auto_detect_changed(self) -> None:
+        if self.auto_detect_magnets_var.get():
+            self.last_clipboard_text = ""
+
+    def _poll_clipboard(self) -> None:
+        try:
+            clipboard_text = self.clipboard_get().strip()
+        except tk.TclError:
+            clipboard_text = ""
+        if clipboard_text != self.last_clipboard_text:
+            self.last_clipboard_text = clipboard_text
+            if self.auto_detect_magnets_var.get() and is_magnet_link(clipboard_text) and not self.busy and not self.clipboard_prompt_active:
+                self.clipboard_prompt_active = True
+                try:
+                    accepted = messagebox.askyesno(
+                        APP_TITLE,
+                        f"Download copied magnet link?\n\n{clipboard_text}",
+                        parent=self,
+                    )
+                    if accepted:
+                        self.link_var.set(clipboard_text)
+                        self.load_link()
+                finally:
+                    self.clipboard_prompt_active = False
+        self.after(500, self._poll_clipboard)
+
+    def show_settings_dialog(self) -> None:
+        dialog = tk.Toplevel(self)
+        dialog.title("Settings")
+        dialog.geometry("680x430")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        dialog.grab_set()
+        frame = ttk.Frame(dialog, style="App.TFrame", padding=20)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="Application settings", style="CardTitle.TLabel").pack(anchor="w")
+        ttk.Label(frame, text="Edit the settings used for new downloads.", style="Subtitle.TLabel").pack(anchor="w", pady=(3, 14))
+        location_row = ttk.Frame(frame, style="App.TFrame")
+        location_row.pack(fill="x")
+        ttk.Label(location_row, text="Default download location", style="Body.TLabel", width=25).pack(side="left")
+        ttk.Entry(location_row, textvariable=self.destination_var, style="Folder.TEntry").pack(side="left", fill="x", expand=True)
+        ttk.Button(location_row, text="Browse", command=self.choose_folder, style="Secondary.TButton").pack(side="left", padx=(10, 0))
+        ttk.Checkbutton(
+            frame,
+            text="Auto-detect copied magnet links",
+            variable=self.auto_detect_magnets_var,
+            command=self._on_auto_detect_changed,
+            style="Theme.TCheckbutton",
+        ).pack(anchor="w", pady=(18, 0))
+        ttk.Label(frame, text="Appearance", style="CardTitle.TLabel").pack(anchor="w", pady=(24, 8))
+        appearance_frame = ttk.Frame(frame, style="App.TFrame")
+        appearance_frame.pack(fill="x")
+        for index, (theme, label) in enumerate(THEME_LABELS.items()):
+            ttk.Radiobutton(
+                appearance_frame,
+                text=label,
+                variable=self.theme_var,
+                value=theme,
+                command=lambda selected=theme: self._apply_theme(selected),
+                style="Theme.TRadiobutton",
+            ).grid(row=index // 2, column=index % 2, sticky="w", padx=(0, 28), pady=5)
+        ttk.Button(frame, text="Done", command=dialog.destroy, style="Primary.TButton").pack(anchor="e", pady=(18, 0))
+
+    def _set_global_download_state(self, paused: bool) -> None:
+        if not self.torrent_share or not self.download_running:
+            return
+        with self.torrent_share.lock:
+            self.torrent_share.paused = paused
+        if paused:
+            self.torrent_share.handle.pause()
+            self.share_control_var.set("Resume all")
+            self.status_var.set("All files paused. Resume when you are ready.")
+        else:
+            self.torrent_share.handle.resume()
+            self.share_control_var.set("Pause all")
+            self.status_var.set("All selected files are downloading...")
+        self._update_download_controls()
+
+    def stop_all_downloads(self) -> None:
+        self._set_global_download_state(True)
+
+    def resume_all_downloads(self) -> None:
+        self._set_global_download_state(False)
 
     def show_load_dialog(self) -> None:
         dialog = tk.Toplevel(self)
@@ -620,16 +749,8 @@ class DropLinkApp(tk.Tk):
         if not self.torrent_share or not self.download_running:
             return
         with self.torrent_share.lock:
-            self.torrent_share.paused = not self.torrent_share.paused
-            paused = self.torrent_share.paused
-        if paused:
-            self.torrent_share.handle.pause()
-            self.share_control_var.set("Resume all")
-            self.status_var.set("All files paused. Resume when you are ready.")
-        else:
-            self.torrent_share.handle.resume()
-            self.share_control_var.set("Pause all")
-            self.status_var.set("All selected files are downloading...")
+            paused = not self.torrent_share.paused
+        self._set_global_download_state(paused)
 
     def _update_selection(self, *_args: object) -> None:
         selected = sum(variable.get() for variable in self.file_vars.values())
@@ -684,15 +805,66 @@ class DropLinkApp(tk.Tk):
         if chosen:
             self.destination_var.set(chosen)
 
+    def confirm_magnet_download(self, files: list[FileEntry]) -> Path | None:
+        dialog = tk.Toplevel(self)
+        dialog.title("Confirm magnet download")
+        dialog.geometry("680x360")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        dialog.grab_set()
+        frame = ttk.Frame(dialog, style="App.TFrame", padding=20)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text=f"Download {len(files)} selected file(s)", style="CardTitle.TLabel").pack(anchor="w")
+        ttk.Label(frame, text="Review the files and choose where this magnet download should be saved.", style="Subtitle.TLabel").pack(anchor="w", pady=(3, 12))
+        file_list = tk.Listbox(frame, height=8, activestyle="none", exportselection=False, font=("Segoe UI", 9))
+        file_list.pack(fill="both", expand=True)
+        for file in files:
+            file_list.insert("end", f"{file.name}  |  {file.size or 'Size unknown'}")
+        destination = tk.StringVar(value=self.destination_var.get())
+        ttk.Label(frame, text="Download location", style="Body.TLabel").pack(anchor="w", pady=(12, 4))
+        folder_row = ttk.Frame(frame, style="App.TFrame")
+        folder_row.pack(fill="x")
+        ttk.Entry(folder_row, textvariable=destination, style="Folder.TEntry").pack(side="left", fill="x", expand=True)
+
+        def browse() -> None:
+            chosen = filedialog.askdirectory(initialdir=destination.get(), parent=dialog)
+            if chosen:
+                destination.set(chosen)
+
+        ttk.Button(folder_row, text="Browse", command=browse, style="Secondary.TButton").pack(side="left", padx=(10, 0))
+        result: list[Path | None] = [None]
+
+        def confirm() -> None:
+            value = destination.get().strip()
+            if not value:
+                messagebox.showinfo(APP_TITLE, "Choose a download location first.", parent=dialog)
+                return
+            result[0] = Path(value).expanduser()
+            dialog.destroy()
+
+        actions = ttk.Frame(frame, style="App.TFrame")
+        actions.pack(fill="x", pady=(14, 0))
+        ttk.Button(actions, text="Cancel", command=dialog.destroy, style="Secondary.TButton").pack(side="right")
+        ttk.Button(actions, text="Start download", command=confirm, style="Primary.TButton").pack(side="right", padx=(0, 8))
+        dialog.wait_window()
+        if result[0] is not None:
+            self.destination_var.set(str(result[0]))
+        return result[0]
+
     def download_selected(self) -> None:
         selected = [file for file, variable in zip(self.files, self.check_vars) if variable.get()]
-        destination = Path(self.destination_var.get()).expanduser()
         if not selected:
             messagebox.showinfo(APP_TITLE, "Select at least one file to download.")
             return
-        if not destination:
+        if not self.destination_var.get().strip():
             messagebox.showinfo(APP_TITLE, "Choose a download location first.")
             return
+        if self.torrent_share:
+            destination = self.confirm_magnet_download(selected)
+            if destination is None:
+                return
+        else:
+            destination = Path(self.destination_var.get()).expanduser()
         self._set_busy(True)
         self.progress_var.set(0)
         self.total_progress_label_var.set("All selected: 0%")
@@ -792,7 +964,7 @@ class DropLinkApp(tk.Tk):
 
     def _set_busy(self, busy: bool) -> None:
         self.busy = busy
-        self.load_button.configure(state="disabled" if busy else "normal")
+        self.file_menu.entryconfigure(0, state="disabled" if busy else "normal")
         self._update_selection()
 
     def _update_download_controls(self) -> None:
@@ -800,4 +972,8 @@ class DropLinkApp(tk.Tk):
         self.pause_button.configure(state=state)
         for button in self.file_pause_buttons.values():
             button.configure(state=state)
+        if hasattr(self, "file_menu"):
+            paused = bool(self.torrent_share and self.torrent_share.paused)
+            self.file_menu.entryconfigure(self.stop_all_menu_index, state="normal" if state == "normal" and not paused else "disabled")
+            self.file_menu.entryconfigure(self.resume_all_menu_index, state="normal" if state == "normal" and paused else "disabled")
 
