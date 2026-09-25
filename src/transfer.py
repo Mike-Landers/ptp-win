@@ -63,7 +63,7 @@ class LinkClient:
             size = files.file_size(index)
             kind = Path(name).suffix.lstrip(".").upper() or "File"
             selected = saved_files.get(index, {}).get("selected", True)
-            entries.append(FileEntry(name=name, url="", size=format_bytes(size), kind=kind, selected=selected, torrent_index=index))
+            entries.append(FileEntry(name=name, url="", size=format_bytes(size), kind=kind, selected=selected, torrent_index=index, size_bytes=size))
             handle.file_priority(index, 0)
         handle.pause()
         name = torrent.name() or "Magnet share"
@@ -120,8 +120,27 @@ class LinkClient:
             progress(snapshots, completed, total)
             if finished:
                 handle.pause()
+                LinkClient.cleanup_completed_torrent(files, share, destination)
                 return
             if status.errc and status.errc.value() != 0:
                 handle.pause()
                 raise OSError(status.errc.message())
             time.sleep(0.5)
+
+    @staticmethod
+    def cleanup_completed_torrent(selected_files: list[FileEntry], share: TorrentShare, destination: Path) -> None:
+        handle = share.handle
+        torrent_files = handle.torrent_file().files()
+        selected_indexes = {file.torrent_index for file in selected_files}
+        root = destination.expanduser().resolve()
+        for index in range(torrent_files.num_files()):
+            if index in selected_indexes:
+                continue
+            candidate = (root / Path(torrent_files.file_path(index))).resolve()
+            if root not in candidate.parents:
+                raise OSError(f"Refusing to remove a torrent file outside the download folder: {candidate}")
+            if candidate.is_file() or candidate.is_symlink():
+                candidate.unlink()
+        share.session.remove_torrent(handle)
+        with share.lock:
+            share.paused_indexes.clear()

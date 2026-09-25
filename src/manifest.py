@@ -29,8 +29,12 @@ def parse_manifest(payload: object, source_url: str = "") -> tuple[str, list[Fil
             continue
         full_url = urllib.parse.urljoin(source_url, url)
         kind = str(item.get("type") or Path(name).suffix.lstrip(".").upper() or "File")
-        size = format_bytes(item.get("size")) if item.get("size") is not None else ""
-        files.append(FileEntry(name=name, url=full_url, size=size, kind=kind))
+        raw_size = item.get("size")
+        try:
+            size_bytes = int(raw_size) if raw_size is not None else None
+        except (TypeError, ValueError):
+            size_bytes = None
+        files.append(FileEntry(name=name, url=full_url, size=format_bytes(size_bytes), kind=kind, size_bytes=size_bytes))
 
     if not files:
         raise ValueError("No downloadable files were found in this link.")
