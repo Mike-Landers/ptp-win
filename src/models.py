@@ -21,6 +21,7 @@ class FileEntry:
     kind: str = "File"
     selected: bool = True
     torrent_index: int | None = None
+    size_bytes: int | None = None
 
 
 @dataclass

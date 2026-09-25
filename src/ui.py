@@ -350,11 +350,14 @@ class DropLinkApp(tk.Tk):
         self.download_running = False
         self.file_paused: dict[int, bool] = {}
         self.file_pause_buttons: dict[int, ttk.Button] = {}
-        self.check_vars: list[tk.BooleanVar] = []
         self.file_vars: dict[int, tk.BooleanVar] = {}
         self.file_progress_vars: dict[int, tk.StringVar] = {}
         self.file_progress_values: dict[int, tk.DoubleVar] = {}
         self.group_expanded: dict[tuple[bool, str], bool] = {}
+        self.group_vars: dict[tuple[bool, str], tk.BooleanVar] = {}
+        self.group_files: dict[tuple[bool, str], list[FileEntry]] = {}
+        self.tree_group_keys: dict[str, tuple[bool, str]] = {}
+        self.tree_file_keys: dict[str, FileEntry] = {}
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
         self.busy = False
         self.link_var = tk.StringVar()
@@ -401,12 +404,18 @@ class DropLinkApp(tk.Tk):
         style.map("Theme.TRadiobutton", background=[("active", colors["app"])], foreground=[("active", colors["title"])])
         style.configure("Theme.TCheckbutton", background=colors["app"], foreground=colors["title"], font=("Segoe UI", 10))
         style.map("Theme.TCheckbutton", background=[("active", colors["app"])], foreground=[("active", colors["title"])])
+        style.configure("File.TCheckbutton", background=colors["card"], foreground=colors["title"], font=("Segoe UI", 9))
+        style.map("File.TCheckbutton", background=[("active", colors["card"])], foreground=[("active", colors["title"])])
+        style.configure("Files.Treeview", background=colors["card"], fieldbackground=colors["card"], foreground=colors["title"], rowheight=38, font=("Segoe UI", 9))
+        style.configure("Files.Treeview.Heading", background=colors["status"], foreground=colors["group"], font=("Segoe UI Semibold", 9))
+        style.map("Files.Treeview", background=[("selected", colors["hover"])], foreground=[("selected", colors["title"])])
+        style.map("Files.Treeview.Heading", background=[("active", colors["status"])], foreground=[("active", colors["group"])])
         style.configure("Link.TEntry", fieldbackground=colors["entry"], foreground=colors["title"], padding=10, borderwidth=1)
         style.configure("Folder.TEntry", fieldbackground=colors["entry"], foreground=colors["title"], padding=8, borderwidth=1)
         style.configure("Download.Horizontal.TProgressbar", troughcolor=colors["trough"], background=colors["progress"], borderwidth=0, thickness=8)
         self.configure(bg=colors["app"])
-        if hasattr(self, "files_canvas"):
-            self.files_canvas.configure(background=colors["card"])
+        if hasattr(self, "files_tree"):
+            self.files_tree.configure(style="Files.Treeview")
         if hasattr(self, "menu_bar"):
             self._configure_menu_colors(colors)
 
@@ -461,16 +470,28 @@ class DropLinkApp(tk.Tk):
         ttk.Label(share_heading, textvariable=self.share_title_var, style="CardTitle.TLabel").pack(anchor="w")
         ttk.Label(share_heading, text="Files in this share", style="Body.TLabel").pack(anchor="w", pady=(2, 0))
         ttk.Label(list_header, textvariable=self.selection_var, style="Body.TLabel").pack(side="right")
-        self.files_canvas = tk.Canvas(list_card, background="#ffffff", highlightthickness=0)
-        scrollbar = ttk.Scrollbar(list_card, orient="vertical", command=self.files_canvas.yview)
-        self.files_frame = ttk.Frame(self.files_canvas, style="Card.TFrame")
-        self.files_frame.bind("<Configure>", lambda _event: self.files_canvas.configure(scrollregion=self.files_canvas.bbox("all")))
-        self.files_canvas.create_window((0, 0), window=self.files_frame, anchor="nw", tags="files")
-        self.files_canvas.configure(yscrollcommand=scrollbar.set)
-        self.files_canvas.pack(side="left", fill="both", expand=True, pady=(16, 0))
+        self.files_tree = ttk.Treeview(
+            list_card,
+            columns=("select", "size"),
+            show=("tree", "headings"),
+            style="Files.Treeview",
+            selectmode="browse",
+        )
+        self.files_tree.heading("#0", text="File", anchor="w")
+        self.files_tree.heading("select", text="Select", anchor="center")
+        self.files_tree.heading("size", text="Size", anchor="e")
+        self.files_tree.column("#0", width=80, minwidth=1, stretch=False, anchor="w")
+        self.files_tree.column("select", width=10, minwidth=1, stretch=False, anchor="center")
+        self.files_tree.column("size", width=10, minwidth=1, stretch=False, anchor="e")
+        self.files_tree.bind("<ButtonPress-1>", self._block_column_resize)
+        self.files_tree.bind("<Button-1>", self._on_file_tree_click)
+        self.files_tree.bind("<Configure>", self._fit_columns_to_table)
+        scrollbar = ttk.Scrollbar(list_card, orient="vertical", command=self.files_tree.yview)
+        self.files_tree.configure(yscrollcommand=scrollbar.set)
+        self.files_tree.pack(side="left", fill="both", expand=True, pady=(16, 0))
         scrollbar.pack(side="right", fill="y", pady=(16, 0))
-        self.files_canvas.bind("<Configure>", self._resize_file_window)
         self._show_empty_state()
+        self.after_idle(self._fit_columns_to_table)
         content_pane.add(list_card, weight=4)
 
         footer = ttk.Frame(root, style="App.TFrame")
@@ -484,14 +505,25 @@ class DropLinkApp(tk.Tk):
         self.progress = ttk.Progressbar(footer, variable=self.progress_var, maximum=100, style="Download.Horizontal.TProgressbar", length=120)
         self.progress.pack(side="right", padx=(12, 0))
 
-    def _resize_file_window(self, event: tk.Event) -> None:
-        self.files_canvas.itemconfigure("files", width=event.width)
-
     def _show_empty_state(self) -> None:
-        for child in self.files_frame.winfo_children():
-            child.destroy()
-        ttk.Label(self.files_frame, text="No files loaded", style="CardTitle.TLabel").pack(pady=(70, 4))
-        ttk.Label(self.files_frame, text="Use Load files above to inspect a peer share.", style="Body.TLabel").pack(pady=(0, 70))
+        self.files_tree.delete(*self.files_tree.get_children())
+        self.files_tree.insert("", "end", iid="empty", text="No files loaded", values=("", ""))
+
+    def _block_column_resize(self, event: tk.Event) -> str | None:
+        if self.files_tree.identify_region(event.x, event.y) == "separator":
+            return "break"
+        return None
+
+    def _fit_columns_to_table(self, _event: tk.Event | None = None) -> None:
+        if not self.files_tree.winfo_width():
+            return
+        available = max(3, self.files_tree.winfo_width() - 2)
+        file_width = round(available * 0.80)
+        select_width = round(available * 0.10)
+        size_width = available - file_width - select_width
+        self.files_tree.column("#0", width=file_width)
+        self.files_tree.column("select", width=select_width)
+        self.files_tree.column("size", width=size_width)
 
     def _refresh_resume_button(self) -> None:
         if hasattr(self, "file_menu"):
@@ -678,75 +710,102 @@ class DropLinkApp(tk.Tk):
         self.total_progress_label_var.set("All selected: 0%")
         self.progress_var.set(0)
         self.files = sort_share_files(files)
-        self.check_vars = []
         self.file_vars = {}
         self.file_progress_vars = {}
         self.file_progress_values = {}
         self.file_pause_buttons = {}
         self.file_paused = {}
         self.group_expanded = {}
+        self.group_vars = {}
+        self.group_files = {}
         saved = self.store.get(self.current_magnet_link) if self.current_magnet_link else None
         saved_files = {int(item["index"]): item for item in (saved or {}).get("files", []) if "index" in item}
         for file in self.files:
             file_key = id(file)
-            self.file_vars[file_key] = tk.BooleanVar(value=file.selected)
+            saved_file = saved_files.get(file.torrent_index, {})
+            default_selected = not is_text_file(file.name)
+            selected = saved_file.get("selected", default_selected)
+            file.selected = selected
+            self.file_vars[file_key] = tk.BooleanVar(value=selected)
             self.file_progress_vars[file_key] = tk.StringVar(value="0%")
             self.file_progress_values[file_key] = tk.DoubleVar(value=0)
-            saved_file = saved_files.get(file.torrent_index, {})
             if saved_file.get("completed"):
                 self.file_progress_vars[file_key].set("100%")
                 self.file_progress_values[file_key].set(100)
             self.file_vars[file_key].trace_add("write", lambda *_args: self._update_selection())
-            self.check_vars.append(self.file_vars[file_key])
         self._render_file_list()
         self._update_selection()
         self._update_download_controls()
-        self.files_canvas.yview_moveto(0)
+        self.files_tree.yview_moveto(0)
 
     def _render_file_list(self) -> None:
-        for child in self.files_frame.winfo_children():
-            child.destroy()
+        self.files_tree.delete(*self.files_tree.get_children())
+        self.tree_group_keys = {}
+        self.tree_file_keys = {}
         for is_text, extension, files in group_share_files(self.files):
             key = (is_text, extension)
-            self.group_expanded.setdefault(key, True)
-            header = ttk.Frame(self.files_frame, style="Card.TFrame", padding=(4, 8))
-            header.pack(fill="x")
-            arrow = "v" if self.group_expanded[key] else ">"
-            ttk.Button(header, text=arrow, width=3, style="Secondary.TButton", command=lambda group_key=key: self._toggle_group(group_key)).pack(side="left", padx=(0, 8))
+            self.group_expanded.setdefault(key, False)
+            self.group_files[key] = files
+            self.group_vars[key] = tk.BooleanVar(value=all(self.file_vars[id(file)].get() for file in files))
+            group_id = f"group-{len(self.tree_group_keys)}"
+            self.tree_group_keys[group_id] = key
             category = "TEXT" if is_text else "BINARY"
-            ttk.Label(header, text=f"{category}  {extension}  ({len(files)})", style="Group.TLabel").pack(side="left")
-            if is_text:
-                ttk.Button(header, text="Deselect text", style="Secondary.TButton", command=lambda group_files=files: self._deselect_text_group(group_files)).pack(side="right")
-            if self.group_expanded[key]:
-                for file in files:
-                    self._render_file_row(file)
+            selected_count = sum(self.file_vars[id(file)].get() for file in files)
+            selected_files = [file for file in files if self.file_vars[id(file)].get()]
+            group_text = f"{category}  {extension} ({selected_count} of {len(files)})"
+            self.files_tree.insert(
+                "", "end", iid=group_id, text=group_text,
+                values=(self._checkbox_text(self.group_vars[key].get()), self._size_summary(selected_files, files)),
+                open=self.group_expanded[key], tags=("group",),
+            )
+            for file in files:
+                file_id = f"file-{id(file)}"
+                self.tree_file_keys[file_id] = file
+                self.files_tree.insert(
+                    group_id, "end", iid=file_id, text=file.name,
+                    values=(self._checkbox_text(self.file_vars[id(file)].get()), self._display_file_size(file)),
+                )
 
-    def _render_file_row(self, file: FileEntry) -> None:
-        file_key = id(file)
-        row = ttk.Frame(self.files_frame, style="Card.TFrame", padding=(34, 7, 4, 7))
-        row.pack(fill="x")
-        variable = self.file_vars[file_key]
-        ttk.Checkbutton(row, variable=variable).pack(side="left", padx=(0, 10))
-        text = ttk.Frame(row, style="Card.TFrame")
-        text.pack(side="left", fill="x", expand=True)
-        ttk.Label(text, text=file.name, style="File.TLabel").pack(anchor="w")
-        ttk.Label(text, text=file.kind, style="Meta.TLabel").pack(anchor="w", pady=(2, 0))
-        progress = ttk.Progressbar(row, variable=self.file_progress_values[file_key], maximum=100, length=75, style="Download.Horizontal.TProgressbar")
-        progress.pack(side="right", padx=(10, 8))
-        ttk.Label(row, textvariable=self.file_progress_vars[file_key], style="Meta.TLabel", width=5, anchor="e").pack(side="right")
-        ttk.Label(row, text=file.size or "Size unknown", style="Meta.TLabel", width=12, anchor="e").pack(side="right")
-        if file.torrent_index is not None:
-            button = ttk.Button(row, text="Pause", style="Secondary.TButton", command=lambda target=file: self.toggle_file_pause(target))
-            button.pack(side="right", padx=(8, 0))
-            self.file_pause_buttons[file_key] = button
+    @staticmethod
+    def _display_file_size(file: FileEntry) -> str:
+        return file.size or format_bytes(file.size_bytes) or "Size unknown"
 
-    def _toggle_group(self, key: tuple[bool, str]) -> None:
-        self.group_expanded[key] = not self.group_expanded[key]
-        self._render_file_list()
+    @staticmethod
+    def _size_summary(selected: list[FileEntry], files: list[FileEntry]) -> str:
+        selected_size = sum(file.size_bytes for file in selected if file.size_bytes is not None)
+        total_size = sum(file.size_bytes for file in files if file.size_bytes is not None)
+        selected_known = any(file.size_bytes is not None for file in selected)
+        total_known = any(file.size_bytes is not None for file in files)
+        selected_label = format_bytes(selected_size) if selected_known or total_known else "Size unknown"
+        total_label = format_bytes(total_size) if total_known else "Size unknown"
+        return f"{selected_label} of {total_label}"
 
-    def _deselect_text_group(self, files: list[FileEntry]) -> None:
+    @staticmethod
+    def _checkbox_text(selected: bool) -> str:
+        return "☑" if selected else "☐"
+
+    def _on_file_tree_click(self, event: tk.Event) -> str | None:
+        if self.files_tree.identify_region(event.x, event.y) == "separator":
+            return "break"
+        item = self.files_tree.identify_row(event.y)
+        column = self.files_tree.identify_column(event.x)
+        if not item or column != "#1":
+            return None
+        if item in self.tree_group_keys:
+            key = self.tree_group_keys[item]
+            self.group_vars[key].set(not self.group_vars[key].get())
+            self._set_group_selection(key, self.group_vars[key].get())
+        elif item in self.tree_file_keys:
+            file = self.tree_file_keys[item]
+            variable = self.file_vars[id(file)]
+            variable.set(not variable.get())
+            self._update_selection()
+        return "break"
+
+    def _set_group_selection(self, key: tuple[bool, str], selected: bool) -> None:
+        files = self.group_files[key]
         for file in files:
-            self.file_vars[id(file)].set(False)
+            self.file_vars[id(file)].set(selected)
         self._update_selection()
 
     def toggle_file_pause(self, file: FileEntry) -> None:
@@ -777,6 +836,24 @@ class DropLinkApp(tk.Tk):
         selected = sum(variable.get() for variable in self.file_vars.values())
         self.selection_var.set(f"{selected} of {len(self.files)} selected") if self.files else self.selection_var.set("0 files selected")
         self.download_button.configure(state="normal" if selected and not self.busy else "disabled")
+        if not hasattr(self, "files_tree"):
+            return
+        for key, files in self.group_files.items():
+            group_selected = all(self.file_vars[id(file)].get() for file in files)
+            self.group_vars[key].set(group_selected)
+        for item, key in self.tree_group_keys.items():
+            files = self.group_files[key]
+            selected_count = sum(self.file_vars[id(file)].get() for file in files)
+            category = "TEXT" if key[0] else "BINARY"
+            selected_files = [file for file in files if self.file_vars[id(file)].get()]
+            self.files_tree.item(
+                item,
+                text=f"{category}  {key[1]} ({selected_count} of {len(files)})",
+                values=(self._checkbox_text(selected_count == len(files)), self._size_summary(selected_files, files)),
+            )
+        for item, file in self.tree_file_keys.items():
+            self.files_tree.set(item, "select", self._checkbox_text(self.file_vars[id(file)].get()))
+            self.files_tree.set(item, "size", self._display_file_size(file))
 
     def _save_current_record(self, destination: Path) -> None:
         if not self.torrent_share or not self.current_magnet_link:
@@ -873,7 +950,7 @@ class DropLinkApp(tk.Tk):
         return result[0]
 
     def download_selected(self) -> None:
-        selected = [file for file, variable in zip(self.files, self.check_vars) if variable.get()]
+        selected = [file for file in self.files if self.file_vars[id(file)].get()]
         if not selected:
             messagebox.showinfo(APP_TITLE, "Select at least one file to download.")
             return

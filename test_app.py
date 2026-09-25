@@ -1,10 +1,12 @@
 import unittest
+import threading
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from src.manifest import parse_manifest
 from src.models import (
     FileEntry,
+    TorrentShare,
     format_bytes,
     group_share_files,
     is_magnet_link,
@@ -13,6 +15,7 @@ from src.models import (
     sort_share_files,
 )
 from src.storage import DownloadStore
+from src.transfer import LinkClient
 
 
 class ManifestTests(unittest.TestCase):
@@ -76,6 +79,43 @@ class ManifestTests(unittest.TestCase):
                 "files": [{"index": 0, "selected": True, "completed": True}],
             })
             self.assertEqual(store.records(), [])
+
+    def test_cleanup_completed_torrent_removes_unselected_files_and_handle(self) -> None:
+        class TorrentFiles:
+            def num_files(self) -> int:
+                return 2
+
+            def file_path(self, index: int) -> str:
+                return ["keep.txt", "remove.bin"][index]
+
+        class Torrent:
+            def files(self) -> TorrentFiles:
+                return TorrentFiles()
+
+        class Handle:
+            def torrent_file(self) -> Torrent:
+                return Torrent()
+
+        class Session:
+            def __init__(self) -> None:
+                self.removed = None
+
+            def remove_torrent(self, handle: Handle) -> None:
+                self.removed = handle
+
+        with TemporaryDirectory() as directory:
+            destination = Path(directory)
+            kept = destination / "keep.txt"
+            removed = destination / "remove.bin"
+            kept.write_text("keep", encoding="utf-8")
+            removed.write_text("remove", encoding="utf-8")
+            handle = Handle()
+            session = Session()
+            share = TorrentShare(handle, session, "magnet:?xt=test", "Test", set(), threading.Lock())
+            LinkClient.cleanup_completed_torrent([FileEntry("keep.txt", "", torrent_index=0)], share, destination)
+            self.assertTrue(kept.exists())
+            self.assertFalse(removed.exists())
+            self.assertIs(session.removed, handle)
 
 
 if __name__ == "__main__":
