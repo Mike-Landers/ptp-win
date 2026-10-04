@@ -1,0 +1,6 @@
+{
+    "continue.pauseTabAutocompleteOnBattery": true,
+    "continue.enableConsole": true,
+    "continue.enableQuickActions": true,
+    "continue.enableTabAutocomplete": true
+}
