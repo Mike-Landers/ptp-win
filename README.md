@@ -4,15 +4,13 @@ A small Windows desktop app for reviewing and downloading files from a peer shar
 
 ## Run
 
-Requires Python 3.10 or newer. Tkinter is included with the standard Windows Python installer. Install the torrent engine for magnet-link support:
+Requires Python 3.10 or newer. Tkinter is included with the standard Windows Python installer. The launcher installs the torrent engine for magnet-link support:
 
 ```powershell
-python -m pip install -r requirements.txt
+.\run-app.ps1
 ```
 
-```powershell
-python -m src.main
-```
+The script creates and activates a `.venv` environment if needed, installs the requirements, and starts the app. To run it from a PowerShell session that blocks local scripts, use `powershell -ExecutionPolicy Bypass -File .\run-app.ps1`.
 
 Use the `Load files` menu at the top of the window to enter a link, try the demo share, or resume an unfinished magnet. Drag the divider between the share and download-location sections to change their vertical sizes.
 
