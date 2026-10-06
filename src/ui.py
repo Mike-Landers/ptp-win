@@ -363,7 +363,7 @@ class DropLinkApp(tk.Tk):
         self.link_var = tk.StringVar()
         self.destination_var = tk.StringVar(value=str(DEFAULT_DOWNLOAD_DIR))
         self.theme_var = tk.StringVar(value="standard_light")
-        self.auto_detect_magnets_var = tk.BooleanVar(value=False)
+        self.auto_detect_magnets_var = tk.BooleanVar(value=True)
         self.last_clipboard_text = ""
         self.clipboard_prompt_active = False
         self.status_var = tk.StringVar(value="Use Load files to choose a peer link")
