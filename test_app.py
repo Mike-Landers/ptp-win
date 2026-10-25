@@ -16,6 +16,7 @@ from src.models import (
 )
 from src.storage import DownloadStore
 from src.transfer import LinkClient
+from src.ui import DropLinkApp
 
 
 class ManifestTests(unittest.TestCase):
@@ -116,6 +117,19 @@ class ManifestTests(unittest.TestCase):
             self.assertTrue(kept.exists())
             self.assertFalse(removed.exists())
             self.assertIs(session.removed, handle)
+
+
+class UiHandlerTests(unittest.TestCase):
+    def test_menu_command_handlers_exist(self) -> None:
+        for handler in (
+            "show_load_dialog",
+            "show_saved_shares",
+            "stop_all_downloads",
+            "resume_all_downloads",
+            "show_settings_dialog",
+        ):
+            with self.subTest(handler=handler):
+                self.assertTrue(callable(getattr(DropLinkApp, handler, None)))
 
 
 if __name__ == "__main__":

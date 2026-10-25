@@ -546,12 +546,10 @@ class DropLinkApp(tk.Tk):
                 try:
                     accepted = messagebox.askyesno(
                         APP_TITLE,
-                        f"Download copied magnet link?\n\n{clipboard_text}",
-                        parent=self,
+                        f"Download copied magnet link?\n\n{self._get_magnet_title(clipboard_text)}",
                     )
                     if accepted:
                         self.link_var.set(clipboard_text)
-                        self.load_link()
                 finally:
                     self.clipboard_prompt_active = False
         self.after(500, self._poll_clipboard)
@@ -1075,3 +1073,14 @@ class DropLinkApp(tk.Tk):
             self.file_menu.entryconfigure(self.stop_all_menu_index, state="normal" if state == "normal" and not paused else "disabled")
             self.file_menu.entryconfigure(self.resume_all_menu_index, state="normal" if state == "normal" and paused else "disabled")
 
+    def _get_magnet_title(self, clipboard_text):
+        # Extract the name from the magnet link using regex
+        import re
+        name_match = re.search(r'dn=([^&]+)', clipboard_text)
+        if name_match:
+            # URL decode the name
+            import urllib.parse
+            return urllib.parse.unquote(name_match.group(1))
+        else:
+            # If no name found, return a default or the whole link
+            return "Unnamed Magnet Link"
