@@ -1,7 +1,9 @@
 import unittest
 import threading
+from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from src.manifest import parse_manifest
 from src.models import (
@@ -17,6 +19,7 @@ from src.models import (
 from src.storage import DownloadStore
 from src.transfer import LinkClient
 from src.ui import DropLinkApp
+from src.ui.downloads import load_progress_timed_out
 
 
 class ManifestTests(unittest.TestCase):
@@ -46,6 +49,24 @@ class ManifestTests(unittest.TestCase):
     def test_accepts_magnet_links(self) -> None:
         self.assertTrue(is_magnet_link("MAGNET:?xt=urn:btih:abc"))
         self.assertEqual(normalize_link("ptp://peer.example/share"), "https://peer.example/share")
+
+    def test_fetch_manifest_reports_loading_progress(self) -> None:
+        manifest = b'{"name":"Team share","files":[{"name":"notes.txt","url":"notes.txt"}]}'
+        response = BytesIO(manifest)
+        response.headers = {"Content-Length": str(len(manifest))}
+        progress: list[tuple[str, int]] = []
+
+        with patch("src.transfer.urllib.request.urlopen", return_value=response):
+            name, files = LinkClient.fetch_manifest(
+                "https://peer.example/share.json",
+                progress=lambda status, percentage: progress.append((status, percentage)),
+            )
+
+        self.assertEqual(name, "Team share")
+        self.assertEqual(files[0].name, "notes.txt")
+        self.assertEqual(progress[0], ("Connecting to peer", 5))
+        self.assertEqual(progress[-1], ("Share ready", 100))
+        self.assertTrue(any("Reading share manifest" in status for status, _ in progress))
 
     def test_sorts_binary_before_text_then_by_extension(self) -> None:
         files = [
@@ -120,6 +141,15 @@ class ManifestTests(unittest.TestCase):
 
 
 class UiHandlerTests(unittest.TestCase):
+    def test_loading_share_name_comes_from_saved_name_magnet_or_peer(self) -> None:
+        self.assertEqual(DropLinkApp._loading_share_name("magnet:?xt=urn:test&dn=Film%20Name", None), "Film Name")
+        self.assertEqual(DropLinkApp._loading_share_name("https://peer.example/team.json", None), "team")
+        self.assertEqual(DropLinkApp._loading_share_name("magnet:?xt=urn:test", {"name": "Saved share"}), "Saved share")
+
+    def test_load_times_out_after_one_minute_without_progress(self) -> None:
+        self.assertFalse(load_progress_timed_out(100.0, 159.9))
+        self.assertTrue(load_progress_timed_out(100.0, 160.0))
+
     def test_menu_command_handlers_exist(self) -> None:
         for handler in (
             "show_load_dialog",
