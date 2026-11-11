@@ -168,6 +168,16 @@ class LinkClient:
         os.replace(temporary, target)
 
     @staticmethod
+    def cleanup_temporary_downloads(files: list[FileEntry], destination: Path) -> None:
+        for file in files:
+            target = destination / safe_filename(file.name)
+            temporary = target.with_name(target.name + ".part")
+            if temporary.exists() or temporary.is_symlink():
+                temporary.unlink()
+            if temporary.exists() or temporary.is_symlink():
+                raise OSError(f"Could not remove temporary download file: {temporary}")
+
+    @staticmethod
     def download_torrent(files: list[FileEntry], share: TorrentShare, destination: Path, progress: callable) -> None:
         handle = share.handle
         handle.move_storage(str(destination))

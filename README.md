@@ -30,6 +30,8 @@ Torrent files are sorted into binary and text sections, then grouped by extensio
 
 When a magnet download starts, DropLink stores its link, destination, file selection, and completion state under `%LOCALAPPDATA%\DropLink\shares.json`. Use `Resume saved (N)` in a later session to reload an unfinished share. `Pause all` pauses or resumes the whole torrent, while each torrent file has its own `Pause`/`Resume` button. Records are removed automatically once every selected file in that share is complete.
 
+After all selected files finish downloading successfully, DropLink removes any leftover temporary download files, displays the total selected size and share name, and clears the loaded share from the main window.
+
 The `ptp://` scheme is currently an alias for an HTTPS manifest endpoint, so a peer service can expose a link such as `ptp://peer.example/share/abc` while keeping transport details behind the endpoint.
 
 The manifest can be an object:

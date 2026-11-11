@@ -7,7 +7,7 @@ import urllib.parse
 from pathlib import Path
 from tkinter import messagebox
 
-from ..models import FileEntry, TorrentShare, is_magnet_link, normalize_link
+from ..models import FileEntry, TorrentShare, format_bytes, is_magnet_link, normalize_link
 from ..transfer import LinkClient
 from .base import UIBase
 from .constants import APP_TITLE
@@ -203,15 +203,33 @@ class DownloadsMixin(UIBase):
         self.total_progress_label_var.set("All selected: 0%")
         self.current_destination = destination
         self.download_running = True
+        share_name = self.manifest_name or self.share_title_var.get()
+        known_sizes = [file.size_bytes for file in selected]
+        selected_size = (
+            format_bytes(sum(size for size in known_sizes if size is not None))
+            if all(size is not None for size in known_sizes)
+            else "Size unknown"
+        )
         if self.torrent_share:
             self.torrent_share.paused = False
             self._save_current_record(destination)
             self.share_control_var.set("Pause all")
         self._update_download_controls()
         self.status_var.set(f"Preparing {len(selected)} file(s)...")
-        threading.Thread(target=self._download_worker, args=(selected, destination, self.torrent_share), daemon=True).start()
+        threading.Thread(
+            target=self._download_worker,
+            args=(selected, destination, self.torrent_share, share_name, selected_size),
+            daemon=True,
+        ).start()
 
-    def _download_worker(self, files: list[FileEntry], destination: Path, torrent_share: TorrentShare | None) -> None:
+    def _download_worker(
+        self,
+        files: list[FileEntry],
+        destination: Path,
+        torrent_share: TorrentShare | None,
+        share_name: str,
+        selected_size: str,
+    ) -> None:
         completed = 0
         failures: list[str] = []
         if torrent_share:
@@ -226,16 +244,19 @@ class DownloadsMixin(UIBase):
                 completed = len(files)
             except (OSError, RuntimeError) as error:
                 failures.append(f"Torrent download: {error}")
-            self.events.put(("finished", (completed, len(files), failures, destination)))
-            return
-        for file in files:
-            try:
-                self.events.put(("status", f"Downloading {file.name}..."))
-                LinkClient.download(file, destination, lambda copied, total: self.events.put(("progress", (completed, len(files), copied, total))))
-                completed += 1
-            except (urllib.error.URLError, OSError, ValueError) as error:
-                failures.append(f"{file.name}: {error}")
-        self.events.put(("finished", (completed, len(files), failures, destination)))
+        else:
+            for file in files:
+                try:
+                    self.events.put(("status", f"Downloading {file.name}..."))
+                    LinkClient.download(file, destination, lambda copied, total: self.events.put(("progress", (completed, len(files), copied, total))))
+                    completed += 1
+                except (urllib.error.URLError, OSError, ValueError) as error:
+                    failures.append(f"{file.name}: {error}")
+        try:
+            LinkClient.cleanup_temporary_downloads(files, destination)
+        except OSError as error:
+            failures.append(f"Temporary file cleanup: {error}")
+        self.events.put(("finished", (completed, len(files), failures, destination, share_name, selected_size)))
 
     def _process_events(self) -> None:
         try:
@@ -296,21 +317,27 @@ class DownloadsMixin(UIBase):
                     self.progress_var.set(overall)
                     self.total_progress_label_var.set(f"All selected: {overall:.0f}%")
                 elif event == "finished":
-                    completed, total_files, failures, destination = payload
+                    completed, total_files, failures, destination, share_name, selected_size = payload
                     was_complete = completed == total_files and not failures
                     self._set_busy(False)
                     self.download_running = False
                     self.share_control_var.set("Pause all")
+                    if was_complete:
+                        if self.torrent_share:
+                            self._remove_completed_record()
+                        self._clear_loaded_share()
+                        self._set_busy(False)
+                        self.status_var.set("Use Load files to choose a peer link")
+                        messagebox.showinfo(APP_TITLE, f"Download {selected_size} finished for {share_name}")
+                        continue
                     self._update_download_controls()
-                    self.progress_var.set(100 if completed == total_files else 0)
-                    self.total_progress_label_var.set("All selected: 100%" if completed == total_files else "All selected: 0%")
+                    self.progress_var.set(0)
+                    self.total_progress_label_var.set("All selected: 0%")
                     self.status_var.set(f"{completed} of {total_files} file(s) downloaded to {destination}")
                     if failures:
                         messagebox.showwarning(APP_TITLE, "Some files could not be downloaded:\n\n" + "\n".join(failures))
                     else:
-                        if self.torrent_share and was_complete:
-                            self._remove_completed_record()
-                        messagebox.showinfo(APP_TITLE, f"Downloaded {completed} file(s) to:\n{destination}")
+                        messagebox.showwarning(APP_TITLE, "The selected files were not fully downloaded.")
         except queue.Empty:
             pass
         if (

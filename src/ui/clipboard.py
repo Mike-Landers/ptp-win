@@ -27,6 +27,7 @@ class ClipboardMixin(UIBase):
                     )
                     if accepted:
                         self.link_var.set(clipboard_text)
+                        self.load_link()
                 finally:
                     self.clipboard_prompt_active = False
         self.after(500, self._poll_clipboard)

@@ -8,24 +8,28 @@ THEMES = {
         "meta": "#8490a5", "group": "#344057", "status": "#eef2f8", "button": "#eef2f8",
         "button_active": "#eef2f8", "primary": "#1d6fe8", "primary_active": "#1d6fe8", "hover": "#ffffff",
         "disabled": "#b8c7dc", "entry": "#ffffff", "trough": "#e7edf5", "progress": "#1d6fe8",
+        "row_alt": "#f7f9fc",
     },
     "high_contrast_light": {
         "app": "#ffffff", "card": "#ffffff", "title": "#000000", "body": "#111111",
         "meta": "#000000", "group": "#000000", "status": "#ffffff", "button": "#000000",
         "button_active": "#000000", "primary": "#000000", "primary_active": "#000000", "hover": "#ffffff",
         "disabled": "#000000", "entry": "#ffffff", "trough": "#ffffff", "progress": "#000000",
+        "row_alt": "#e6e6e6",
     },
     "standard_dark": {
         "app": "#1e232b", "card": "#28303b", "title": "#f5f7fb", "body": "#c5ceda",
         "meta": "#a8b3c2", "group": "#e3e9f2", "status": "#303946", "button": "#ffffff",
         "button_active": "#ffffff", "primary": "#ffffff", "primary_active": "#ffffff", "hover": "#28303b",
         "disabled": "#ffffff", "entry": "#202631", "trough": "#414b59", "progress": "#4da3ff",
+        "row_alt": "#2d3642",
     },
     "high_contrast_dark": {
         "app": "#000000", "card": "#0b0b0b", "title": "#ffffff", "body": "#ffffff",
         "meta": "#ffffff", "group": "#ffffff", "status": "#000000", "button": "#ffffff",
         "button_active": "#ffffff", "primary": "#ffffff", "primary_active": "#ffffff", "hover": "#0b0b0b",
         "disabled": "#ffffff", "entry": "#000000", "trough": "#000000", "progress": "#ffffff",
+        "row_alt": "#202020",
     },
 }
 
@@ -77,6 +81,7 @@ class ThemeMixin(UIBase):
         self.configure(bg=colors["app"])
         if hasattr(self, "files_tree"):
             self.files_tree.configure(style="Files.Treeview")
+            self.files_tree.tag_configure("row-alt", background=colors["row_alt"])
         if hasattr(self, "menu_bar"):
             self._configure_menu_colors(colors)
 

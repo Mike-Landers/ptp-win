@@ -19,7 +19,7 @@ class DropLinkApp(ThemeMixin, FileListMixin, DialogMixin, ClipboardMixin, Downlo
     def __init__(self) -> None:
         super().__init__()
         self.title(APP_TITLE)
-        self.geometry("900x700")
+        self.geometry("1200x700")
         self.minsize(720, 560)
         self.configure(bg="#f5f7fb")
 
@@ -35,10 +35,18 @@ class DropLinkApp(ThemeMixin, FileListMixin, DialogMixin, ClipboardMixin, Downlo
         self.file_vars: dict[int, tk.BooleanVar] = {}
         self.file_progress_vars: dict[int, tk.StringVar] = {}
         self.file_progress_values: dict[int, tk.DoubleVar] = {}
-        self.group_expanded: dict[tuple[bool, str], bool] = {}
-        self.group_vars: dict[tuple[bool, str], tk.BooleanVar] = {}
-        self.group_files: dict[tuple[bool, str], list[FileEntry]] = {}
-        self.tree_group_keys: dict[str, tuple[bool, str]] = {}
+        self.group_expanded: dict[tuple[str, ...], bool] = {}
+        self.group_vars: dict[tuple[str, ...], tk.BooleanVar] = {}
+        self.group_files: dict[tuple[str, ...], list[FileEntry]] = {}
+        self.selected_file_count = 0
+        self.file_group_keys: dict[int, tuple[tuple[str, ...], ...]] = {}
+        self.group_selected_counts: dict[tuple[str, ...], int] = {}
+        self.group_selected_sizes: dict[tuple[str, ...], int] = {}
+        self.group_total_sizes: dict[tuple[str, ...], int] = {}
+        self.group_has_known_sizes: dict[tuple[str, ...], bool] = {}
+        self.tree_group_items: dict[tuple[str, ...], str] = {}
+        self.tree_group_labels: dict[str, str] = {}
+        self.tree_group_keys: dict[str, tuple[str, ...]] = {}
         self.tree_file_keys: dict[str, FileEntry] = {}
         self.events: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.busy = False
@@ -105,6 +113,7 @@ class DropLinkApp(ThemeMixin, FileListMixin, DialogMixin, ClipboardMixin, Downlo
             style="Files.Treeview",
             selectmode="browse",
         )
+        self.files_tree.tag_configure("row-alt", background=THEMES[self.theme_var.get()]["row_alt"])
         self.files_tree.heading("#0", text="File", anchor="w")
         self.files_tree.heading("select", text="Select", anchor="center")
         self.files_tree.heading("size", text="Size", anchor="e")

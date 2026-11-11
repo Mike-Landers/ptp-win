@@ -1,9 +1,10 @@
+import queue
 import unittest
 import threading
 from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from src.manifest import parse_manifest
 from src.models import (
@@ -19,7 +20,9 @@ from src.models import (
 from src.storage import DownloadStore
 from src.transfer import LinkClient
 from src.ui import DropLinkApp
-from src.ui.downloads import load_progress_timed_out
+from src.ui.clipboard import ClipboardMixin
+from src.ui.downloads import DownloadsMixin, load_progress_timed_out
+from src.ui.file_list import FileListMixin, build_directory_tree
 
 
 class ManifestTests(unittest.TestCase):
@@ -82,6 +85,112 @@ class ManifestTests(unittest.TestCase):
         groups = group_share_files(files)
         self.assertEqual([(is_text, extension, len(group)) for is_text, extension, group in groups], [(False, ".png", 1), (True, ".txt", 2)])
 
+    def test_share_directory_tree_supports_parent_and_nested_selection(self) -> None:
+        album_one = FileEntry("Artist/Studio Albums/Album One/track-1.flac", "")
+        album_two = FileEntry("Artist/Studio Albums/Album Two/track-2.flac", "")
+        live_album = FileEntry("Artist/Live Albums/Show/track-3.flac", "")
+        root, directories = build_directory_tree([album_one, album_two, live_album])
+
+        self.assertEqual(set(root.directories), {"Artist"})
+        self.assertEqual(
+            [file.name for file in directories[("Artist", "Studio Albums")]],
+            [album_one.name, album_two.name],
+        )
+        self.assertEqual(directories[("Artist", "Studio Albums", "Album One")], [album_one])
+        self.assertEqual(
+            {file.name for file in directories[("Artist",)]},
+            {album_one.name, album_two.name, live_album.name},
+        )
+
+    def test_selecting_directory_and_nested_album_are_independent(self) -> None:
+        class SelectionVariable:
+            def __init__(self) -> None:
+                self.selected = True
+
+            def get(self) -> bool:
+                return self.selected
+
+            def set(self, selected: bool) -> None:
+                self.selected = selected
+
+        album_one = FileEntry("Artist/Studio Albums/Album One/track-1.flac", "")
+        album_two = FileEntry("Artist/Studio Albums/Album Two/track-2.flac", "")
+        live_album = FileEntry("Artist/Live Albums/Show/track-3.flac", "")
+        _, directory_files = build_directory_tree([album_one, album_two, live_album])
+
+        class SelectionHarness:
+            group_files = directory_files
+            files = [album_one, album_two, live_album]
+            busy = False
+            file_vars = {
+                id(file): SelectionVariable()
+                for file in (album_one, album_two, live_album)
+            }
+            file_group_keys = {
+                id(album_one): (
+                    ("Artist",),
+                    ("Artist", "Studio Albums"),
+                    ("Artist", "Studio Albums", "Album One"),
+                ),
+                id(album_two): (
+                    ("Artist",),
+                    ("Artist", "Studio Albums"),
+                    ("Artist", "Studio Albums", "Album Two"),
+                ),
+                id(live_album): (
+                    ("Artist",),
+                    ("Artist", "Live Albums"),
+                    ("Artist", "Live Albums", "Show"),
+                ),
+            }
+            selected_file_count = 3
+            group_selected_counts = {
+                key: len(files)
+                for key, files in directory_files.items()
+            }
+            group_selected_sizes = {key: 0 for key in directory_files}
+            selection_var = Mock()
+            download_button = Mock()
+            _update_selection = Mock()
+
+            def _refresh_selection_display(
+                self,
+                files: list[FileEntry],
+                groups: set[tuple[str, ...]],
+            ) -> None:
+                FileListMixin._refresh_selection_display(self, files, groups)
+
+        app = SelectionHarness()
+        FileListMixin._set_group_selection(app, ("Artist", "Studio Albums"), False)
+        FileListMixin._set_group_selection(app, ("Artist", "Studio Albums", "Album Two"), True)
+
+        self.assertFalse(app.file_vars[id(album_one)].get())
+        self.assertTrue(app.file_vars[id(album_two)].get())
+        self.assertTrue(app.file_vars[id(live_album)].get())
+        self.assertEqual(app.selected_file_count, 2)
+        self.assertEqual(app.group_selected_counts[("Artist", "Studio Albums")], 1)
+        app._update_selection.assert_not_called()
+
+    def test_directory_subtrees_stay_within_their_extension_section(self) -> None:
+        flac_track = FileEntry("Artist/Studio Albums/Album One/track.flac", "")
+        jpg_cover = FileEntry("Artist/Studio Albums/Album One/cover.jpg", "")
+        files = [flac_track, jpg_cover]
+        sections = group_share_files(files)
+
+        self.assertEqual(
+            [(is_text, extension, [file.name for file in grouped]) for is_text, extension, grouped in sections],
+            [
+                (False, ".flac", [flac_track.name]),
+                (False, ".jpg", [jpg_cover.name]),
+            ],
+        )
+        for _, extension, grouped_files in sections:
+            _, directories = build_directory_tree(grouped_files)
+            self.assertEqual(
+                [file.name for file in directories[("Artist", "Studio Albums", "Album One")]],
+                [f"Artist/Studio Albums/Album One/{'cover.jpg' if extension == '.jpg' else 'track.flac'}"],
+            )
+
     def test_download_store_saves_reads_and_removes_records(self) -> None:
         with TemporaryDirectory() as directory:
             store = DownloadStore(Path(directory) / "shares.json")
@@ -139,6 +248,20 @@ class ManifestTests(unittest.TestCase):
             self.assertFalse(removed.exists())
             self.assertIs(session.removed, handle)
 
+    def test_cleanup_temporary_downloads_removes_partial_files(self) -> None:
+        with TemporaryDirectory() as directory:
+            destination = Path(directory)
+            file = FileEntry("report.pdf", "")
+            target = destination / "report.pdf"
+            temporary = destination / "report.pdf.part"
+            target.write_text("complete", encoding="utf-8")
+            temporary.write_text("partial", encoding="utf-8")
+
+            LinkClient.cleanup_temporary_downloads([file], destination)
+
+            self.assertTrue(target.exists())
+            self.assertFalse(temporary.exists())
+
 
 class UiHandlerTests(unittest.TestCase):
     def test_loading_share_name_comes_from_saved_name_magnet_or_peer(self) -> None:
@@ -150,6 +273,32 @@ class UiHandlerTests(unittest.TestCase):
         self.assertFalse(load_progress_timed_out(100.0, 159.9))
         self.assertTrue(load_progress_timed_out(100.0, 160.0))
 
+    def test_successful_download_completion_clears_share_and_shows_summary(self) -> None:
+        class CompletionHarness:
+            def __init__(self) -> None:
+                self.events = queue.Queue()
+                self.events.put(("finished", (1, 1, [], Path("downloads"), "Example share", "2.0 MB")))
+                self.download_running = True
+                self.load_in_progress = False
+                self.torrent_share = None
+                self.share_control_var = Mock()
+                self.status_var = Mock()
+                self._set_busy = Mock()
+                self._clear_loaded_share = Mock()
+                self.after = Mock()
+
+            def _process_events(self) -> None:
+                DownloadsMixin._process_events(self)
+
+        app = CompletionHarness()
+        with patch("src.ui.downloads.messagebox.showinfo") as showinfo:
+            app._process_events()
+
+        app._clear_loaded_share.assert_called_once_with()
+        self.assertFalse(app.download_running)
+        app.status_var.set.assert_called_once_with("Use Load files to choose a peer link")
+        showinfo.assert_called_once_with("DropLink", "Download 2.0 MB finished for Example share")
+
     def test_menu_command_handlers_exist(self) -> None:
         for handler in (
             "show_load_dialog",
@@ -160,6 +309,37 @@ class UiHandlerTests(unittest.TestCase):
         ):
             with self.subTest(handler=handler):
                 self.assertTrue(callable(getattr(DropLinkApp, handler, None)))
+
+    def test_accepting_detected_magnet_starts_loading(self) -> None:
+        class ClipboardApp:
+            def __init__(self) -> None:
+                self.last_clipboard_text = ""
+                self.auto_detect_magnets_var = Mock()
+                self.auto_detect_magnets_var.get.return_value = True
+                self.busy = False
+                self.clipboard_prompt_active = False
+                self.link_var = Mock()
+                self.load_link = Mock()
+
+            def clipboard_get(self) -> str:
+                return "magnet:?xt=urn:btih:test&dn=Example"
+
+            def _get_magnet_title(self, _clipboard_text: str) -> str:
+                return "Example"
+
+            def _poll_clipboard(self) -> None:
+                ClipboardMixin._poll_clipboard(self)
+
+            def after(self, _delay: int, _callback: object) -> None:
+                pass
+
+        app = ClipboardApp()
+        with patch("src.ui.clipboard.messagebox.askyesno", return_value=True):
+            ClipboardMixin._poll_clipboard(app)
+
+        app.link_var.set.assert_called_once_with("magnet:?xt=urn:btih:test&dn=Example")
+        app.load_link.assert_called_once_with()
+        self.assertFalse(app.clipboard_prompt_active)
 
 
 if __name__ == "__main__":
