@@ -113,7 +113,7 @@ class DropLinkApp(ThemeMixin, FileListMixin, DialogMixin, ClipboardMixin, Downlo
             style="Files.Treeview",
             selectmode="browse",
         )
-        self.files_tree.tag_configure("row-alt", background=THEMES[self.theme_var.get()]["row_alt"])
+        self._configure_file_row_tags(THEMES[self.theme_var.get()])
         self.files_tree.heading("#0", text="File", anchor="w")
         self.files_tree.heading("select", text="Select", anchor="center")
         self.files_tree.heading("size", text="Size", anchor="e")
@@ -124,7 +124,10 @@ class DropLinkApp(ThemeMixin, FileListMixin, DialogMixin, ClipboardMixin, Downlo
         self.files_tree.bind("<Button-1>", self._on_file_tree_click)
         self.files_tree.bind("<Configure>", self._fit_columns_to_table)
         scrollbar = ttk.Scrollbar(list_card, orient="vertical", command=self.files_tree.yview)
-        self.files_tree.configure(yscrollcommand=scrollbar.set)
+        self._initialize_row_dividers(
+            scrollbar,
+            THEMES[self.theme_var.get()]["row_divider"],
+        )
         self.files_tree.pack(side="left", fill="both", expand=True, pady=(16, 0))
         scrollbar.pack(side="right", fill="y", pady=(16, 0))
         self._show_empty_state()

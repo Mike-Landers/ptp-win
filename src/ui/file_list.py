@@ -48,9 +48,106 @@ def build_directory_tree(files: list[FileEntry]) -> tuple[_DirectoryNode, dict[t
 
 
 class FileListMixin(UIBase):
+    def _initialize_row_dividers(self, scrollbar: tk.Widget, color: str) -> None:
+        self.row_dividers: list[tk.Frame] = []
+        self.row_divider_color = ""
+        self.row_divider_refresh_pending = False
+
+        def update_scrollbar(first: str, last: str) -> None:
+            scrollbar.set(first, last)
+            self._schedule_row_divider_refresh()
+
+        self.files_tree.configure(yscrollcommand=update_scrollbar)
+        self.files_tree.bind("<Configure>", lambda _event: self._schedule_row_divider_refresh(), add="+")
+        self.files_tree.bind("<<TreeviewOpen>>", lambda _event: self._schedule_row_divider_refresh(), add="+")
+        self.files_tree.bind("<<TreeviewClose>>", lambda _event: self._schedule_row_divider_refresh(), add="+")
+        self._set_row_divider_color(color)
+
+    def _set_row_divider_color(self, color: str) -> None:
+        self.row_divider_color = color
+        for divider in self.row_dividers:
+            divider.configure(bg=color)
+        self._schedule_row_divider_refresh()
+
+    def _schedule_row_divider_refresh(self) -> None:
+        if self.row_divider_refresh_pending:
+            return
+        self.row_divider_refresh_pending = True
+        self.after_idle(self._refresh_row_dividers)
+
+    def _refresh_row_dividers(self) -> None:
+        self.row_divider_refresh_pending = False
+        if not self.row_divider_color or not self.files_tree.winfo_exists():
+            return
+        width = self.files_tree.winfo_width()
+        height = self.files_tree.winfo_height()
+        if width <= 1 or height <= 1:
+            return
+
+        separator_positions: list[int] = []
+        row_y = 0
+        found_row = False
+        previous_item = ""
+        while row_y < height:
+            item = self.files_tree.identify_row(row_y)
+            if not item:
+                if found_row:
+                    break
+                row_y += 1
+                continue
+            if item == previous_item:
+                row_y += 1
+                continue
+            bounds = self.files_tree.bbox(item)
+            if not bounds:
+                row_y += 1
+                continue
+            _, item_y, _, item_height = bounds
+            found_row = True
+            previous_item = item
+            divider_y = item_y + item_height - 1
+            if 0 <= divider_y < height:
+                separator_positions.append(divider_y)
+            row_y = item_y + item_height
+
+        while len(self.row_dividers) < len(separator_positions):
+            divider = tk.Frame(
+                self.files_tree,
+                bg=self.row_divider_color,
+                borderwidth=0,
+                highlightthickness=0,
+                takefocus=False,
+            )
+            divider.bind("<Button-1>", self._forward_row_divider_click)
+            divider.bind("<Double-1>", self._forward_row_divider_double_click)
+            self.row_dividers.append(divider)
+        for index, divider in enumerate(self.row_dividers):
+            if index < len(separator_positions):
+                divider.configure(bg=self.row_divider_color)
+                divider.place(x=0, y=separator_positions[index], width=width, height=1)
+            else:
+                divider.place_forget()
+
+    def _forward_row_divider_click(self, event: tk.Event) -> str:
+        self.files_tree.event_generate(
+            "<Button-1>",
+            x=event.x_root - self.files_tree.winfo_rootx(),
+            y=event.y_root - self.files_tree.winfo_rooty(),
+        )
+        return "break"
+
+    def _forward_row_divider_double_click(self, event: tk.Event) -> str:
+        self.files_tree.event_generate(
+            "<Double-1>",
+            x=event.x_root - self.files_tree.winfo_rootx(),
+            y=event.y_root - self.files_tree.winfo_rooty(),
+        )
+        return "break"
+
     def _show_empty_state(self) -> None:
         self.files_tree.delete(*self.files_tree.get_children())
         self.files_tree.insert("", "end", iid="empty", text="No files loaded", values=("", ""))
+        self._schedule_row_divider_refresh()
 
     def _block_column_resize(self, event: tk.Event) -> str | None:
         if self.files_tree.identify_region(event.x, event.y) == "separator":
@@ -153,12 +250,6 @@ class FileListMixin(UIBase):
         self.tree_group_items = {}
         self.tree_group_labels = {}
         next_group_id = 0
-        row_index = 0
-
-        def row_tags(*tags: str) -> tuple[str, ...]:
-            nonlocal row_index
-            row_index += 1
-            return (*tags, "row-alt") if row_index % 2 == 0 else tags
 
         def insert_file(
             parent_id: str,
@@ -175,7 +266,7 @@ class FileListMixin(UIBase):
                 iid=file_id,
                 text=display_name,
                 values=(self._checkbox_text(self.file_vars[id(file)].get()), self._display_file_size(file)),
-                tags=row_tags(),
+                tags=(self._selection_row_tag(self.file_vars[id(file)].get()),),
             )
 
         def insert_directory(
@@ -212,7 +303,7 @@ class FileListMixin(UIBase):
                         self._selection_group_size_summary(key),
                     ),
                     open=self.group_expanded[key],
-                    tags=row_tags("group"),
+                    tags=("group", self._selection_row_tag(selected_count == len(files))),
                 )
                 group_keys = parent_group_keys + (key,)
                 insert_directory(directory_id, child, directory_path, section_key, directory_files, group_keys)
@@ -243,12 +334,13 @@ class FileListMixin(UIBase):
                     self._selection_group_size_summary(section_key),
                 ),
                 open=self.group_expanded[section_key],
-                tags=row_tags("group"),
+                tags=("group", self._selection_row_tag(selected_count == len(files))),
             )
             root, directory_files = build_directory_tree(files)
             insert_directory(section_id, root, (), section_key, directory_files, (section_key,))
             for file in sorted(root.files, key=lambda entry: entry.name.casefold()):
                 insert_file(section_id, file, (section_key,))
+        self._schedule_row_divider_refresh()
 
     def _register_selection_group(self, key: tuple[str, ...], files: list[FileEntry]) -> None:
         selected_count = 0
@@ -294,6 +386,10 @@ class FileListMixin(UIBase):
     @staticmethod
     def _checkbox_text(selected: bool) -> str:
         return "☑" if selected else "☐"
+
+    @staticmethod
+    def _selection_row_tag(selected: bool) -> str:
+        return "row-selected" if selected else "row-unselected"
 
     def _on_file_tree_click(self, event: tk.Event) -> str | None:
         if self.files_tree.identify_region(event.x, event.y) == "separator":
@@ -359,7 +455,10 @@ class FileListMixin(UIBase):
         if not hasattr(self, "files_tree"):
             return
         for file in files:
-            self.files_tree.set(f"file-{id(file)}", "select", self._checkbox_text(self.file_vars[id(file)].get()))
+            selected = self.file_vars[id(file)].get()
+            file_item = f"file-{id(file)}"
+            self.files_tree.set(file_item, "select", self._checkbox_text(selected))
+            self.files_tree.item(file_item, tags=(self._selection_row_tag(selected),))
         for key in group_keys:
             group_item = self.tree_group_items[key]
             selected_count = self.group_selected_counts[key]
@@ -369,6 +468,7 @@ class FileListMixin(UIBase):
                 group_item,
                 text=f"{self.tree_group_labels[group_item]} ({selected_count} of {len(self.group_files[key])})",
                 values=(self._checkbox_text(all_selected), self._selection_group_size_summary(key)),
+                tags=("group", self._selection_row_tag(all_selected)),
             )
 
     def _update_selection(self, *_args: object) -> None:

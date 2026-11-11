@@ -36,6 +36,9 @@ class UIBase(tk.Tk, ABC):
     tree_group_labels: dict[str, str]
     tree_group_keys: dict[str, tuple[str, ...]]
     tree_file_keys: dict[str, FileEntry]
+    row_dividers: list[tk.Frame]
+    row_divider_color: str
+    row_divider_refresh_pending: bool
     events: queue.Queue[tuple[str, Any]]
     busy: bool
     load_request_id: int
