@@ -111,7 +111,7 @@ class DropLinkApp(ThemeMixin, FileListMixin, DialogMixin, ClipboardMixin, Downlo
             columns=("select", "size"),
             show=("tree", "headings"),
             style="Files.Treeview",
-            selectmode="browse",
+            selectmode="none",
         )
         self._configure_file_row_tags(THEMES[self.theme_var.get()])
         self.files_tree.heading("#0", text="File", anchor="w")
