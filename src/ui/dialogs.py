@@ -1,10 +1,8 @@
-from pathlib import Path
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, ttk
 
-from ..models import FileEntry
 from .base import UIBase
-from .constants import APP_TITLE, DEFAULT_DOWNLOAD_DIR
+from .constants import DEFAULT_DOWNLOAD_DIR
 from .theme import THEME_LABELS
 
 
@@ -112,49 +110,3 @@ class DialogMixin(UIBase):
         chosen = filedialog.askdirectory(initialdir=self.destination_var.get())
         if chosen:
             self.destination_var.set(chosen)
-
-    def confirm_magnet_download(self, files: list[FileEntry]) -> Path | None:
-        dialog = tk.Toplevel(self)
-        dialog.title("Confirm magnet download")
-        dialog.geometry("680x360")
-        dialog.resizable(False, False)
-        dialog.transient(self)
-        dialog.grab_set()
-        frame = ttk.Frame(dialog, style="App.TFrame", padding=20)
-        frame.pack(fill="both", expand=True)
-        ttk.Label(frame, text=f"Download {len(files)} selected file(s)", style="CardTitle.TLabel").pack(anchor="w")
-        ttk.Label(frame, text="Review the files and choose where this magnet download should be saved.", style="Subtitle.TLabel").pack(anchor="w", pady=(3, 12))
-        file_list = tk.Listbox(frame, height=8, activestyle="none", exportselection=False, font=("Segoe UI", 9))
-        file_list.pack(fill="both", expand=True)
-        for file in files:
-            file_list.insert("end", f"{file.name}  |  {file.size or 'Size unknown'}")
-        destination = tk.StringVar(value=self.destination_var.get())
-        ttk.Label(frame, text="Download location", style="Body.TLabel").pack(anchor="w", pady=(12, 4))
-        folder_row = ttk.Frame(frame, style="App.TFrame")
-        folder_row.pack(fill="x")
-        ttk.Entry(folder_row, textvariable=destination, style="Folder.TEntry").pack(side="left", fill="x", expand=True)
-
-        def browse() -> None:
-            chosen = filedialog.askdirectory(initialdir=destination.get(), parent=dialog)
-            if chosen:
-                destination.set(chosen)
-
-        ttk.Button(folder_row, text="Browse", command=browse, style="Secondary.TButton").pack(side="left", padx=(10, 0))
-        result: list[Path | None] = [None]
-
-        def confirm() -> None:
-            value = destination.get().strip()
-            if not value:
-                messagebox.showinfo(APP_TITLE, "Choose a download location first.", parent=dialog)
-                return
-            result[0] = Path(value).expanduser()
-            dialog.destroy()
-
-        actions = ttk.Frame(frame, style="App.TFrame")
-        actions.pack(fill="x", pady=(14, 0))
-        ttk.Button(actions, text="Cancel", command=dialog.destroy, style="Secondary.TButton").pack(side="right")
-        ttk.Button(actions, text="Start download", command=confirm, style="Primary.TButton").pack(side="right", padx=(0, 8))
-        dialog.wait_window()
-        if result[0] is not None:
-            self.destination_var.set(str(result[0]))
-        return result[0]

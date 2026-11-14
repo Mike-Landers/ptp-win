@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 import threading
+from typing import Any
 
 
 TEXT_EXTENSIONS = {
@@ -26,8 +27,8 @@ class FileEntry:
 
 @dataclass
 class TorrentShare:
-    handle: object
-    session: object
+    handle: Any
+    session: Any
     link: str
     name: str
     paused_indexes: set[int]

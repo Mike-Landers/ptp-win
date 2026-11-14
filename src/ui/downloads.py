@@ -1,39 +1,67 @@
-import json
 import queue
 import threading
-import time
 import urllib.error
-import urllib.parse
+from dataclasses import dataclass
 from pathlib import Path
 from tkinter import messagebox
 
-from ..models import FileEntry, TorrentShare, format_bytes, is_magnet_link, normalize_link
+from ..models import FileEntry, TorrentShare, format_bytes
 from ..transfer import LinkClient
 from .base import UIBase
 from .constants import APP_TITLE
+from .selection import (
+    ShareSelectionWindow,
+    metadata_load_timed_out as _metadata_load_timed_out,
+    magnet_link_name,
+)
 
 
-LOAD_STALL_TIMEOUT_SECONDS = 60
+def metadata_load_timed_out(
+    load_started_at: float,
+    current_time: float,
+    metadata_loaded: bool = False,
+) -> bool:
+    return _metadata_load_timed_out(load_started_at, current_time, metadata_loaded)
 
 
-def load_progress_timed_out(last_progress_at: float, current_time: float) -> bool:
-    return current_time - last_progress_at >= LOAD_STALL_TIMEOUT_SECONDS
+@dataclass
+class DownloadJob:
+    files: list[FileEntry]
+    destination: Path
+    torrent_share: TorrentShare | None
+    link: str
+    share_name: str
+    selected_size: str
+    progress: float = 0
+    status: str = "Preparing download"
+    downloaded_bytes: int = 0
+    progress_reported: bool = False
 
 
 class DownloadsMixin(UIBase):
     def _set_global_download_state(self, paused: bool) -> None:
-        if not self.torrent_share or not self.download_running:
+        shares = [
+            job.torrent_share
+            for job in self.download_jobs.values()
+            if job.torrent_share is not None
+        ]
+        if not shares:
             return
-        with self.torrent_share.lock:
-            self.torrent_share.paused = paused
+        for share in shares:
+            with share.lock:
+                share.paused = paused
+            if paused:
+                share.handle.pause()
+            else:
+                share.handle.resume()
         if paused:
-            self.torrent_share.handle.pause()
-            self.share_control_var.set("Resume all")
             self.status_var.set("All files paused. Resume when you are ready.")
         else:
-            self.torrent_share.handle.resume()
-            self.share_control_var.set("Pause all")
             self.status_var.set("All selected files are downloading...")
+        for request_id, job in self.download_jobs.items():
+            if job.torrent_share:
+                job.status = "Paused" if paused else "Downloading"
+                self._refresh_download_row(request_id, job)
         self._update_download_controls()
 
     def stop_all_downloads(self) -> None:
@@ -42,335 +70,337 @@ class DownloadsMixin(UIBase):
     def resume_all_downloads(self) -> None:
         self._set_global_download_state(False)
 
-    def load_demo(self) -> None:
-        self.link_var.set("ptp://demo.local/share/aurora")
-        self.torrent_share = None
-        self.current_magnet_link = ""
-        self.file_paused = {}
-        self._set_files("Aurora design archive", [
-            FileEntry("aurora-brand-kit.zip", "https://example.com/aurora-brand-kit.zip", "48.2 MB", "ZIP"),
-            FileEntry("release-notes.pdf", "https://example.com/release-notes.pdf", "1.4 MB", "PDF"),
-            FileEntry("product-preview.mp4", "https://example.com/product-preview.mp4", "126 MB", "MP4", False),
-        ])
-        self.status_var.set("Demo share loaded. Review the selection before downloading.")
-
     def load_link(self) -> None:
         link = self.link_var.get().strip()
         if not link:
             messagebox.showinfo(APP_TITLE, "Paste a peer link first.")
             return
-        if self.busy:
+        if link in self.selection_windows:
+            self.selection_windows[link].lift()
+            return
+        if any(job.link == link for job in self.download_jobs.values()):
+            messagebox.showinfo(APP_TITLE, "This link is already downloading.")
             return
         saved = self.store.get(link)
-        if saved and saved.get("destination"):
-            self.destination_var.set(saved["destination"])
-        destination = Path(self.destination_var.get()).expanduser()
-        self.load_request_id += 1
-        request_id = self.load_request_id
-        cancel_event = threading.Event()
-        self.load_cancel_event = cancel_event
-        self.load_in_progress = True
-        self.load_progress_percent = 0
-        self.load_last_progress_at = time.monotonic()
-        share_name = self._loading_share_name(link, saved)
-        self.share_title_var.set(f"Loading share [{share_name}]")
-        self.total_progress_label_var.set("Loading: 0% complete")
-        self.progress_var.set(0)
-        self._set_busy(True)
-        self.status_var.set("Connecting to peer...")
-        threading.Thread(
-            target=self._load_worker,
-            args=(link, request_id, destination, saved, cancel_event),
-            daemon=True,
-        ).start()
 
-    @staticmethod
-    def _loading_share_name(link: str, saved: dict | None) -> str:
-        if saved and saved.get("name"):
-            return str(saved["name"])
-        if is_magnet_link(link):
-            display_name = urllib.parse.parse_qs(urllib.parse.urlparse(link).query).get("dn")
-            return display_name[0] if display_name else "Unnamed share"
-        parsed = urllib.parse.urlparse(normalize_link(link))
-        path_name = Path(urllib.parse.unquote(parsed.path)).stem
-        return path_name or parsed.hostname or "Unknown share"
-
-    def _load_worker(
-        self,
-        link: str,
-        request_id: int,
-        destination: Path,
-        saved: dict | None,
-        cancel_event: threading.Event,
-    ) -> None:
-        try:
-            result = LinkClient.fetch_link(
-                link,
-                destination,
-                saved,
-                progress=lambda status, percentage: self.events.put(
-                    ("load_progress", (request_id, status, percentage, time.monotonic()))
-                ),
-                cancel_event=cancel_event,
-            )
-            self.events.put(("loaded", (request_id, result, destination)))
-        except (ValueError, json.JSONDecodeError, urllib.error.URLError, TimeoutError, OSError, RuntimeError) as error:
-            self.events.put(("load_error", (request_id, str(error))))
-
-    def toggle_file_pause(self, file: FileEntry) -> None:
-        if not self.torrent_share or file.torrent_index is None:
-            return
-        file_key = id(file)
-        paused = not self.file_paused.get(file_key, False)
-        self.file_paused[file_key] = paused
-        with self.torrent_share.lock:
-            if paused:
-                self.torrent_share.paused_indexes.add(file.torrent_index)
-            else:
-                self.torrent_share.paused_indexes.discard(file.torrent_index)
-        if self.download_running:
-            self.torrent_share.handle.file_priority(file.torrent_index, 0 if paused else 1)
-        button = self.file_pause_buttons.get(file_key)
-        if button:
-            button.configure(text="Resume" if paused else "Pause")
+        saved_destination = saved.get("destination") if saved else None
+        destination = Path(saved_destination or self.destination_var.get()).expanduser()
+        window = ShareSelectionWindow(
+            self,
+            link,
+            destination,
+            saved,
+            self.store,
+            self._start_download,
+            self._selection_window_closed,
+        )
+        self.selection_windows[link] = window
 
     def toggle_share_pause(self) -> None:
-        if not self.torrent_share or not self.download_running:
+        shares = [
+            job.torrent_share
+            for job in self.download_jobs.values()
+            if job.torrent_share is not None
+        ]
+        if not shares:
             return
-        with self.torrent_share.lock:
-            paused = not self.torrent_share.paused
-        self._set_global_download_state(paused)
+        self._set_global_download_state(not all(share.paused for share in shares))
 
-    def _save_current_record(self, destination: Path) -> None:
-        if not self.torrent_share or not self.current_magnet_link:
+    def _save_torrent_progress(self, job: DownloadJob, snapshots: dict[int, tuple[int, int]]) -> None:
+        if not job.torrent_share:
             return
-        previous = self.store.get(self.current_magnet_link)
-        previous_files = {int(item["index"]): item for item in (previous or {}).get("files", []) if "index" in item}
-        files = []
-        for file in self.files:
-            file_key = id(file)
-            old = previous_files.get(file.torrent_index, {}) if file.torrent_index is not None else {}
-            files.append({
-                "index": file.torrent_index,
-                "name": file.name,
-                "size": file.size,
-                "selected": self.file_vars[file_key].get(),
-                "completed": old.get("completed", False) or self.file_progress_values[file_key].get() >= 100,
-            })
-        self.store.save({
-            "link": self.current_magnet_link,
-            "name": self.torrent_share.name,
-            "destination": str(destination),
-            "files": files,
-        })
-        self._refresh_resume_button()
-
-    def _save_torrent_progress(self, snapshots: dict[int, tuple[int, int]]) -> None:
-        if not self.torrent_share:
-            return
-        previous = self.store.get(self.current_magnet_link) or {}
+        previous = self.store.get(job.link) or {}
         previous_files = {int(item["index"]): item for item in previous.get("files", []) if "index" in item}
         for index, (current, total) in snapshots.items():
             item = previous_files.setdefault(index, {"index": index})
             item["completed"] = current >= total
-        for file in self.files:
-            if file.torrent_index in previous_files:
-                previous_files[file.torrent_index]["selected"] = self.file_vars[id(file)].get()
-        previous.update({"link": self.current_magnet_link, "name": self.torrent_share.name, "destination": str(self.current_destination), "files": list(previous_files.values())})
+        selected_indexes = {
+            file.torrent_index
+            for file in job.files
+            if file.torrent_index is not None
+        }
+        for index, item in previous_files.items():
+            item["selected"] = index in selected_indexes
+        previous.update({
+            "link": job.link,
+            "name": job.torrent_share.name,
+            "destination": str(job.destination),
+            "files": list(previous_files.values()),
+        })
         self.store.save(previous)
 
-    def _remove_completed_record(self) -> None:
-        if self.current_magnet_link:
-            self.store.remove(self.current_magnet_link)
+    def _remove_completed_record(self, link: str) -> None:
+        if link:
+            self.store.remove(link)
             self._refresh_resume_button()
 
-    def download_selected(self) -> None:
-        selected = [file for file in self.files if self.file_vars[id(file)].get()]
-        if not selected:
-            messagebox.showinfo(APP_TITLE, "Select at least one file to download.")
+    def _selection_window_closed(self, link: str, window: ShareSelectionWindow) -> None:
+        if self.selection_windows.get(link) is window:
+            del self.selection_windows[link]
+
+    def _start_download(
+        self,
+        link: str,
+        share_name: str,
+        selected: list[FileEntry],
+        torrent_share: TorrentShare | None,
+        destination: Path,
+    ) -> None:
+        if any(job.link == link for job in self.download_jobs.values()):
+            messagebox.showinfo(APP_TITLE, "This link is already downloading.")
+            if torrent_share:
+                torrent_share.handle.pause()
+                torrent_share.session.remove_torrent(torrent_share.handle)
             return
-        if not self.destination_var.get().strip():
-            messagebox.showinfo(APP_TITLE, "Choose a download location first.")
-            return
-        if self.torrent_share:
-            destination = self.confirm_magnet_download(selected)
-            if destination is None:
-                return
-        else:
-            destination = Path(self.destination_var.get()).expanduser()
-        self._set_busy(True)
-        self.progress_var.set(0)
-        self.total_progress_label_var.set("All selected: 0%")
-        self.current_destination = destination
-        self.download_running = True
-        share_name = self.manifest_name or self.share_title_var.get()
+
         known_sizes = [file.size_bytes for file in selected]
         selected_size = (
             format_bytes(sum(size for size in known_sizes if size is not None))
             if all(size is not None for size in known_sizes)
             else "Size unknown"
         )
-        if self.torrent_share:
-            self.torrent_share.paused = False
-            self._save_current_record(destination)
-            self.share_control_var.set("Pause all")
+        if torrent_share:
+            torrent_share.paused = False
+            self._refresh_resume_button()
+        self.destination_var.set(str(destination))
+        self.download_request_id += 1
+        request_id = self.download_request_id
+        self.current_download_id = request_id
+        job = DownloadJob(
+            files=selected,
+            destination=destination,
+            torrent_share=torrent_share,
+            link=link,
+            share_name=share_name,
+            selected_size=selected_size,
+        )
+        self.download_jobs[request_id] = job
+        self.download_running = True
+        if self.downloads_tree.exists("empty"):
+            self.downloads_tree.delete("empty")
+        self.downloads_tree.insert(
+            "",
+            "end",
+            iid=f"download-{request_id}",
+            text=magnet_link_name(link) or share_name,
+            values=(len(selected), job.selected_size, job.status),
+        )
+        self._refresh_download_summary()
         self._update_download_controls()
-        self.status_var.set(f"Preparing {len(selected)} file(s)...")
+        self.status_var.set(f"Preparing {share_name}...")
         threading.Thread(
             target=self._download_worker,
-            args=(selected, destination, self.torrent_share, share_name, selected_size),
+            args=(request_id, job),
             daemon=True,
         ).start()
 
+    def _refresh_download_row(self, request_id: int, job: DownloadJob) -> None:
+        item = f"download-{request_id}"
+        if hasattr(self, "downloads_tree") and self.downloads_tree.exists(item):
+            status = (
+                f"{job.downloaded_bytes / (1024 * 1024):.1f}MB / {job.progress:.0f}%"
+                if job.progress_reported
+                else job.status
+            )
+            self.downloads_tree.item(
+                item,
+                text=magnet_link_name(job.link) or job.share_name,
+                values=(len(job.files), job.selected_size, status),
+            )
+
+    def _refresh_download_summary(self) -> None:
+        count = len(self.download_jobs)
+        average = (
+            sum(job.progress for job in self.download_jobs.values()) / count
+            if count
+            else 0
+        )
+        if hasattr(self, "progress_var"):
+            self.progress_var.set(average)
+        if hasattr(self, "total_progress_label_var"):
+            self.total_progress_label_var.set(
+                f"Downloads: {count} active | {average:.0f}% average"
+                if count
+                else "No active downloads"
+            )
+
     def _download_worker(
         self,
-        files: list[FileEntry],
-        destination: Path,
-        torrent_share: TorrentShare | None,
-        share_name: str,
-        selected_size: str,
+        request_id: int,
+        job: DownloadJob,
     ) -> None:
         completed = 0
+        downloaded_bytes = 0
         failures: list[str] = []
-        if torrent_share:
+        if job.torrent_share:
             try:
-                self.events.put(("status", "Downloading selected torrent files..."))
+                self.events.put(("status", (request_id, "Downloading selected torrent files...")))
                 LinkClient.download_torrent(
-                    files,
-                    torrent_share,
-                    destination,
-                    lambda snapshots, copied, total: self.events.put(("torrent_progress", (snapshots, copied, total))),
+                    job.files,
+                    job.torrent_share,
+                    job.destination,
+                    lambda snapshots, copied, total: self.events.put(
+                        ("torrent_progress", (request_id, snapshots, copied, total))
+                    ),
                 )
-                completed = len(files)
+                completed = len(job.files)
             except (OSError, RuntimeError) as error:
                 failures.append(f"Torrent download: {error}")
         else:
-            for file in files:
+            for file in job.files:
+                file_downloaded = 0
+
+                def report_progress(copied: int, total_bytes: int) -> None:
+                    nonlocal file_downloaded
+                    file_downloaded = copied
+                    self.events.put(
+                        (
+                            "progress",
+                            (
+                                request_id,
+                                completed,
+                                len(job.files),
+                                copied,
+                                total_bytes,
+                                downloaded_bytes + copied,
+                            ),
+                        )
+                    )
+
                 try:
-                    self.events.put(("status", f"Downloading {file.name}..."))
-                    LinkClient.download(file, destination, lambda copied, total: self.events.put(("progress", (completed, len(files), copied, total))))
+                    self.events.put(("status", (request_id, f"Downloading {file.name}...")))
+                    LinkClient.download(
+                        file,
+                        job.destination,
+                        report_progress,
+                    )
+                    downloaded_bytes += file_downloaded
                     completed += 1
                 except (urllib.error.URLError, OSError, ValueError) as error:
                     failures.append(f"{file.name}: {error}")
-        try:
-            LinkClient.cleanup_temporary_downloads(files, destination)
-        except OSError as error:
-            failures.append(f"Temporary file cleanup: {error}")
-        self.events.put(("finished", (completed, len(files), failures, destination, share_name, selected_size)))
+        if not job.torrent_share:
+            try:
+                LinkClient.cleanup_temporary_downloads(job.files, job.destination)
+            except OSError as error:
+                failures.append(f"Temporary file cleanup: {error}")
+        self.events.put(("finished", (request_id, completed, len(job.files), failures)))
 
     def _process_events(self) -> None:
         try:
             while True:
                 event, payload = self.events.get_nowait()
-                if event == "load_progress":
-                    request_id, status, percentage, reported_at = payload
-                    if request_id != self.load_request_id or not self.load_in_progress:
-                        continue
-                    self.load_last_progress_at = reported_at
-                    self.load_progress_percent = max(
-                        self.load_progress_percent,
-                        max(0, min(100, int(percentage))),
-                    )
-                    self.status_var.set(status)
-                    self.total_progress_label_var.set(
-                        f"Loading: {self.load_progress_percent}% complete"
-                    )
-                    self.progress_var.set(self.load_progress_percent)
-                elif event == "loaded":
-                    request_id, result, destination = payload
-                    if request_id != self.load_request_id or not self.load_in_progress:
-                        continue
-                    name, files, torrent_share = result
-                    self.load_in_progress = False
-                    self.load_cancel_event = None
-                    self.torrent_share = torrent_share
-                    self.current_magnet_link = torrent_share.link if torrent_share else ""
-                    self.current_destination = destination
-                    self._set_files(name, files)
-                    if torrent_share:
-                        self._save_current_record(self.current_destination)
-                    self._set_busy(False)
-                    self.status_var.set(f"{name} loaded. Confirm the files you want to download.")
-                elif event == "load_error":
-                    request_id, error = payload
-                    if request_id != self.load_request_id or not self.load_in_progress:
-                        continue
-                    self._fail_loading_share(error)
-                elif event == "status":
-                    self.status_var.set(payload)
+                if event == "status":
+                    request_id, status = payload
+                    job = self.download_jobs.get(request_id)
+                    if job:
+                        job.status = (
+                            "Paused"
+                            if job.torrent_share and job.torrent_share.paused
+                            else status
+                        )
+                        self._refresh_download_row(request_id, job)
+                    if request_id == self.current_download_id:
+                        self.status_var.set(status)
                 elif event == "progress":
-                    completed, total_files, copied, total_bytes = payload
+                    request_id, completed, total_files, copied, total_bytes, downloaded_bytes = payload
+                    job = self.download_jobs.get(request_id)
+                    if not job:
+                        continue
                     current = (copied / total_bytes * 100) if total_bytes else 0
-                    self.progress_var.set(((completed + current / 100) / total_files) * 100)
+                    job.progress = ((completed + current / 100) / total_files) * 100
+                    job.downloaded_bytes = downloaded_bytes
+                    job.progress_reported = True
+                    self._refresh_download_row(request_id, job)
+                    self._refresh_download_summary()
                 elif event == "torrent_progress":
-                    snapshots, copied, total = payload
-                    self._save_torrent_progress(snapshots)
-                    for file in self.files:
-                        if file.torrent_index not in snapshots:
-                            continue
-                        current, file_total = snapshots[file.torrent_index]
-                        percentage = (current / file_total * 100) if file_total else 100
-                        file_key = id(file)
-                        self.file_progress_values[file_key].set(percentage)
-                        self.file_progress_vars[file_key].set(f"{percentage:.0f}%")
-                    overall = (copied / total * 100) if total else 0
-                    self.progress_var.set(overall)
-                    self.total_progress_label_var.set(f"All selected: {overall:.0f}%")
+                    request_id, snapshots, copied, total = payload
+                    job = self.download_jobs.get(request_id)
+                    if job and job.torrent_share:
+                        self._save_torrent_progress(job, snapshots)
+                    if not job:
+                        continue
+                    job.progress = (copied / total * 100) if total else 100
+                    job.downloaded_bytes = copied
+                    job.progress_reported = True
+                    self._refresh_download_row(request_id, job)
+                    self._refresh_download_summary()
                 elif event == "finished":
-                    completed, total_files, failures, destination, share_name, selected_size = payload
+                    request_id, completed, total_files, failures = payload
+                    job = self.download_jobs.pop(request_id, None)
+                    if not job:
+                        continue
+                    is_current = request_id == self.current_download_id
                     was_complete = completed == total_files and not failures
-                    self._set_busy(False)
-                    self.download_running = False
-                    self.share_control_var.set("Pause all")
+                    if is_current:
+                        self.current_download_id = max(self.download_jobs, default=None)
+                    self.download_running = bool(self.download_jobs)
+                    row = f"download-{request_id}"
+                    if hasattr(self, "downloads_tree") and self.downloads_tree.exists(row):
+                        self.downloads_tree.delete(row)
+                    if hasattr(self, "downloads_tree") and not self.download_jobs:
+                        self.downloads_tree.insert(
+                            "",
+                            "end",
+                            iid="empty",
+                            text="No active downloads",
+                            values=("", "", ""),
+                        )
                     if was_complete:
-                        if self.torrent_share:
-                            self._remove_completed_record()
-                        self._clear_loaded_share()
-                        self._set_busy(False)
-                        self.status_var.set("Use Load files to choose a peer link")
-                        messagebox.showinfo(APP_TITLE, f"Download {selected_size} finished for {share_name}")
+                        if job.torrent_share:
+                            self._remove_completed_record(job.link)
+                        self._update_download_controls()
+                        self._refresh_download_summary()
+                        if self.download_jobs:
+                            self.status_var.set(f"{job.share_name} finished; other downloads are still active.")
+                        else:
+                            self.status_var.set(f"Download finished for {job.share_name}.")
+                        messagebox.showinfo(
+                            APP_TITLE,
+                            f"Download {job.selected_size} finished for {job.share_name}",
+                        )
                         continue
                     self._update_download_controls()
-                    self.progress_var.set(0)
-                    self.total_progress_label_var.set("All selected: 0%")
-                    self.status_var.set(f"{completed} of {total_files} file(s) downloaded to {destination}")
+                    self._refresh_download_summary()
+                    self.status_var.set(
+                        f"{completed} of {total_files} file(s) downloaded for {job.share_name}."
+                    )
                     if failures:
-                        messagebox.showwarning(APP_TITLE, "Some files could not be downloaded:\n\n" + "\n".join(failures))
+                        messagebox.showwarning(
+                            APP_TITLE,
+                            f"Some files for {job.share_name} could not be downloaded:\n\n"
+                            + "\n".join(failures),
+                        )
                     else:
-                        messagebox.showwarning(APP_TITLE, "The selected files were not fully downloaded.")
+                        messagebox.showwarning(
+                            APP_TITLE,
+                            f"The selected files for {job.share_name} were not fully downloaded.",
+                        )
         except queue.Empty:
             pass
-        if (
-            self.load_in_progress
-            and load_progress_timed_out(self.load_last_progress_at, time.monotonic())
-        ):
-            if self.load_cancel_event:
-                self.load_cancel_event.set()
-            self._fail_loading_share("No loading progress was made for 1 minute.")
         self.after(100, self._process_events)
 
-    def _fail_loading_share(self, error: str) -> None:
-        if self.load_cancel_event:
-            self.load_cancel_event.set()
-        self.load_request_id += 1
-        self.load_in_progress = False
-        self.load_cancel_event = None
-        self._clear_loaded_share()
-        self._set_busy(False)
-        self.status_var.set("Could not load this link.")
-        messagebox.showerror("Failed to load", error)
-
-    def _set_busy(self, busy: bool) -> None:
-        self.busy = busy
-        self.file_menu.entryconfigure(0, state="disabled" if busy else "normal")
-        self._update_selection()
-
     def _update_download_controls(self) -> None:
-        state = "normal" if self.download_running and self.torrent_share else "disabled"
-        self.pause_button.configure(state=state)
-        for button in self.file_pause_buttons.values():
-            button.configure(state=state)
+        active_shares = [
+            job.torrent_share
+            for job in self.download_jobs.values()
+            if job.torrent_share is not None
+        ]
+        global_state = "normal" if active_shares else "disabled"
+        if hasattr(self, "pause_button"):
+            self.pause_button.configure(state=global_state)
+        if active_shares and all(share.paused for share in active_shares):
+            if hasattr(self, "share_control_var"):
+                self.share_control_var.set("Resume all")
+        else:
+            if hasattr(self, "share_control_var"):
+                self.share_control_var.set("Pause all")
         if hasattr(self, "file_menu"):
-            paused = bool(self.torrent_share and self.torrent_share.paused)
-            self.file_menu.entryconfigure(self.stop_all_menu_index, state="normal" if state == "normal" and not paused else "disabled")
-            self.file_menu.entryconfigure(self.resume_all_menu_index, state="normal" if state == "normal" and paused else "disabled")
+            all_paused = bool(active_shares) and all(share.paused for share in active_shares)
+            self.file_menu.entryconfigure(
+                self.stop_all_menu_index,
+                state="normal" if active_shares and not all_paused else "disabled",
+            )
+            self.file_menu.entryconfigure(
+                self.resume_all_menu_index,
+                state="normal" if active_shares and all_paused else "disabled",
+            )

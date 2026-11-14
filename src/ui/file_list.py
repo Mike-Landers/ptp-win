@@ -146,7 +146,7 @@ class FileListMixin(UIBase):
 
     def _show_empty_state(self) -> None:
         self.files_tree.delete(*self.files_tree.get_children())
-        self.files_tree.insert("", "end", iid="empty", text="No files loaded", values=("", ""))
+        self.files_tree.insert("", "end", iid="empty", text="No files loaded", values=("", "", ""))
         self._schedule_row_divider_refresh()
 
     def _block_column_resize(self, event: tk.Event) -> str | None:
@@ -158,12 +158,14 @@ class FileListMixin(UIBase):
         if not self.files_tree.winfo_width():
             return
         available = max(3, self.files_tree.winfo_width() - 2)
-        file_width = round(available * 0.80)
-        select_width = round(available * 0.10)
-        size_width = available - file_width - select_width
+        file_width = round(available * 0.60)
+        select_width = round(available * 0.08)
+        size_width = round(available * 0.12)
+        status_width = available - file_width - select_width - size_width
         self.files_tree.column("#0", width=file_width)
         self.files_tree.column("select", width=select_width)
         self.files_tree.column("size", width=size_width)
+        self.files_tree.column("status", width=status_width)
 
     def _set_files(self, name: str, files: list[FileEntry]) -> None:
         self.manifest_name = name
@@ -265,7 +267,11 @@ class FileListMixin(UIBase):
                 "end",
                 iid=file_id,
                 text=display_name,
-                values=(self._checkbox_text(self.file_vars[id(file)].get()), self._display_file_size(file)),
+                values=(
+                    self._checkbox_text(self.file_vars[id(file)].get()),
+                    self._display_file_size(file),
+                    self.file_progress_vars[id(file)].get() if file.torrent_index is not None else "",
+                ),
                 tags=(self._selection_row_tag(self.file_vars[id(file)].get()),),
             )
 
@@ -301,6 +307,7 @@ class FileListMixin(UIBase):
                     values=(
                         self._checkbox_text(self.group_vars[key].get()),
                         self._selection_group_size_summary(key),
+                        "",
                     ),
                     open=self.group_expanded[key],
                     tags=("group", self._selection_row_tag(selected_count == len(files))),
@@ -332,6 +339,7 @@ class FileListMixin(UIBase):
                 values=(
                     self._checkbox_text(self.group_vars[section_key].get()),
                     self._selection_group_size_summary(section_key),
+                    "",
                 ),
                 open=self.group_expanded[section_key],
                 tags=("group", self._selection_row_tag(selected_count == len(files))),
@@ -392,6 +400,8 @@ class FileListMixin(UIBase):
         return "row-selected" if selected else "row-unselected"
 
     def _on_file_tree_click(self, event: tk.Event) -> str | None:
+        if self.busy or self.download_running:
+            return "break"
         if self.files_tree.identify_region(event.x, event.y) == "separator":
             return "break"
         item = self.files_tree.identify_row(event.y)
@@ -451,7 +461,9 @@ class FileListMixin(UIBase):
         self.selection_var.set(
             f"{selected} of {len(self.files)} selected" if self.files else "0 files selected"
         )
-        self.download_button.configure(state="normal" if selected and not self.busy else "disabled")
+        self.download_button.configure(
+            state="normal" if selected and not self.busy and not self.download_running else "disabled"
+        )
         if not hasattr(self, "files_tree"):
             return
         for file in files:
@@ -467,11 +479,17 @@ class FileListMixin(UIBase):
             self.files_tree.item(
                 group_item,
                 text=f"{self.tree_group_labels[group_item]} ({selected_count} of {len(self.group_files[key])})",
-                values=(self._checkbox_text(all_selected), self._selection_group_size_summary(key)),
+                values=(
+                    self._checkbox_text(all_selected),
+                    self._selection_group_size_summary(key),
+                    "",
+                ),
                 tags=("group", self._selection_row_tag(all_selected)),
             )
 
     def _update_selection(self, *_args: object) -> None:
         selected = self.selected_file_count
         self.selection_var.set(f"{selected} of {len(self.files)} selected") if self.files else self.selection_var.set("0 files selected")
-        self.download_button.configure(state="normal" if selected and not self.busy else "disabled")
+        self.download_button.configure(
+            state="normal" if selected and not self.busy and not self.download_running else "disabled"
+        )

@@ -15,6 +15,9 @@ from .models import FileEntry, TorrentShare, format_bytes, is_magnet_link, norma
 
 
 LoadProgress = Callable[[str, int], None]
+METADATA_PROGRESS_INTERVAL_SECONDS = 15
+METADATA_TIMEOUT_SECONDS = 120
+METADATA_TIMEOUT_PER_ADDITIONAL_PEER_SECONDS = 20
 
 
 class LinkClient:
@@ -103,24 +106,49 @@ class LinkClient:
             progress("Connecting to peers", 5)
         session = lt.session()
         handle = session.add_torrent(params)
-        deadline = time.monotonic() + 120
+        started_at = time.monotonic()
+        metadata_started_at: float | None = None
+        last_progress_at = started_at
         highest_peer_count = 0
+        last_peer_count = 0
         if progress:
-            progress("Waiting for peer metadata", 10)
+            progress("Waiting for peer metadata (0 peers connected)", 10)
         while not handle.has_metadata():
             if cancel_event and cancel_event.is_set():
                 handle.pause()
                 session.remove_torrent(handle)
                 raise RuntimeError("Share loading was cancelled.")
-            if time.monotonic() >= deadline:
-                handle.pause()
-                raise TimeoutError("Timed out waiting for torrent metadata from peers.")
+            now = time.monotonic()
             peer_count = handle.status().num_peers
-            if peer_count > highest_peer_count:
+            peer_count_increased = peer_count > highest_peer_count
+            peer_count_changed = peer_count != last_peer_count
+            if peer_count_increased:
+                if highest_peer_count == 0:
+                    metadata_started_at = now
                 highest_peer_count = peer_count
+            last_peer_count = peer_count
+            timeout_started_at = metadata_started_at if metadata_started_at is not None else started_at
+            timeout_seconds = (
+                METADATA_TIMEOUT_SECONDS
+                + max(0, highest_peer_count - 1) * METADATA_TIMEOUT_PER_ADDITIONAL_PEER_SECONDS
+            )
+            if now - timeout_started_at >= timeout_seconds:
+                handle.pause()
+                session.remove_torrent(handle)
+                raise TimeoutError(
+                    f"Peer metadata did not arrive within {timeout_seconds} seconds."
+                )
+            if peer_count_changed or now - last_progress_at >= METADATA_PROGRESS_INTERVAL_SECONDS:
                 if progress:
                     percentage = min(40, 10 + highest_peer_count * 5)
-                    progress(f"Waiting for peer metadata ({peer_count} peers connected)", percentage)
+                    status = f"Waiting for peer metadata ({peer_count} peers connected)"
+                    if peer_count < highest_peer_count:
+                        status += f"; down from {highest_peer_count}"
+                    progress(
+                        status,
+                        percentage,
+                    )
+                last_progress_at = now
             time.sleep(0.25)
 
         if progress:
